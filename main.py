@@ -151,12 +151,51 @@ def cancel_markup(button_rows=None):
     return InlineKeyboardMarkup(rows)
 
 
+
+async def replace_callback_text(query, text, reply_markup=None, fallback_message=None):
+    if query is None:
+        await fallback_message.reply_text(text, reply_markup=reply_markup)
+        return
+    message = query.message
+    if message.photo:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        await message.reply_text(text, reply_markup=reply_markup)
+        return
+    try:
+        await query.edit_message_text(text, reply_markup=reply_markup)
+    except Exception:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        await message.reply_text(text, reply_markup=reply_markup)
+
+
+async def replace_callback_photo(query, context, photo, caption, reply_markup=None, fallback_message=None):
+    if query is None:
+        await fallback_message.reply_photo(photo=photo, caption=caption, reply_markup=reply_markup)
+        return
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    await context.bot.send_photo(
+        chat_id=query.message.chat_id,
+        photo=photo,
+        caption=caption,
+        reply_markup=reply_markup,
+    )
+
+
 async def home_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     load_search_preferences(update.effective_user.id, context)
     context.user_data.pop("likes_inbox", None)
-    await query.message.reply_text(
+    await replace_callback_text(query, 
         "Главное меню — выбери действие:",
         reply_markup=menu_markup(context.user_data.get("city_only", False), context.user_data.get("age_filter"), update.effective_user.id in ADMIN_IDS),
     )
@@ -178,7 +217,7 @@ async def age_filter_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("Любой возраст", callback_data="age:set:any")],
         [InlineKeyboardButton("↩️ Главное меню", callback_data="menu:home")],
     ])
-    await query.message.reply_text(
+    await replace_callback_text(query, 
         f"Выбери возраст анкет. Сейчас: {age_filter_label(context.user_data.get('age_filter'))}.",
         reply_markup=keyboard,
     )
@@ -192,7 +231,7 @@ async def set_age_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["age_filter"] = None if selected == "any" else selected
     save_search_preferences(update.effective_user.id, context)
     label = age_filter_label(context.user_data.get("age_filter"))
-    await query.message.reply_text(
+    await replace_callback_text(query, 
         f"Возрастной фильтр: {label}.",
         reply_markup=menu_markup(
             context.user_data.get("city_only", False),
@@ -210,7 +249,7 @@ async def toggle_city_search(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data["city_only"] = city_only
     save_search_preferences(update.effective_user.id, context)
     label = "только в твоём городе" if city_only else "по всем городам"
-    await query.message.reply_text(
+    await replace_callback_text(query, 
         f"Поиск анкет настроен: {label}.",
         reply_markup=menu_markup(city_only, context.user_data.get("age_filter"), update.effective_user.id in ADMIN_IDS),
     )
@@ -232,7 +271,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def create_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.message.reply_text(
+        await replace_callback_text(update.callback_query, 
             "Сколько тебе лет? Анкеты доступны только с 18 лет.",
             reply_markup=cancel_markup(),
         )
@@ -434,16 +473,16 @@ async def my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with Session() as db:
         profile = db.get(Profile, user_id)
         if profile is None:
-            await update.effective_message.reply_text("Анкеты пока нет. Создай её: /create")
+            await replace_callback_text(update.callback_query, "Анкеты пока нет. Создай её: /create", fallback_message=update.effective_message)
             return
         text = "Твоя анкета:\n\n" + card_text(profile)
         photo_id = profile.photo_file_id
         username_shared = profile.share_username
     keyboard = profile_keyboard(username_shared)
     if photo_id:
-        await update.effective_message.reply_photo(photo=photo_id, caption=text, reply_markup=keyboard)
+        await replace_callback_photo(update.callback_query, context, photo_id, text, reply_markup=keyboard, fallback_message=update.effective_message)
     else:
-        await update.effective_message.reply_text(text, reply_markup=keyboard)
+        await replace_callback_text(update.callback_query, text, reply_markup=keyboard, fallback_message=update.effective_message)
 
 
 async def matches_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -454,7 +493,7 @@ async def matches_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with Session() as db:
         own = db.get(Profile, user_id)
         if own is None:
-            await update.effective_message.reply_text("Сначала создай анкету: /create", reply_markup=menu_markup(context.user_data.get("city_only", False), context.user_data.get("age_filter"), update.effective_user.id in ADMIN_IDS))
+            await replace_callback_text(update.callback_query, "Сначала создай анкету: /create", reply_markup=menu_markup(context.user_data.get("city_only", False), context.user_data.get("age_filter"), update.effective_user.id in ADMIN_IDS), fallback_message=update.effective_message)
             return
         liked_by_me = set(db.scalars(
             select(Vote.to_id).where(Vote.from_id == user_id, Vote.action == "like")
@@ -472,9 +511,9 @@ async def matches_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 lines.append(f"• {profile.display_name} — контакт не открыт")
     if not lines:
-        await update.effective_message.reply_text("Пока нет взаимных симпатий. Продолжай смотреть анкеты: /next", reply_markup=menu_markup(context.user_data.get("city_only", False), context.user_data.get("age_filter"), update.effective_user.id in ADMIN_IDS))
+        await replace_callback_text(update.callback_query, "Пока нет взаимных симпатий. Продолжай смотреть анкеты: /next", reply_markup=menu_markup(context.user_data.get("city_only", False), context.user_data.get("age_filter"), update.effective_user.id in ADMIN_IDS), fallback_message=update.effective_message)
         return
-    await update.effective_message.reply_text("Твои взаимные симпатии:\n\n" + "\n".join(lines), reply_markup=menu_markup(context.user_data.get("city_only", False), context.user_data.get("age_filter"), update.effective_user.id in ADMIN_IDS))
+    await replace_callback_text(update.callback_query, "Твои взаимные симпатии:\n\n" + "\n".join(lines), reply_markup=menu_markup(context.user_data.get("city_only", False), context.user_data.get("age_filter"), update.effective_user.id in ADMIN_IDS), fallback_message=update.effective_message)
 
 
 async def send_next(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE, reply_to=None):
@@ -575,7 +614,7 @@ async def previous_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with Session() as db:
         me = db.get(Profile, user_id)
         if me is None:
-            await query.message.reply_text("Сначала создай анкету: /create")
+            await replace_callback_text(query, "Сначала создай анкету: /create")
             return
         blocked = select(Block.to_id).where(Block.from_id == user_id).union(
             select(Block.from_id).where(Block.to_id == user_id)
@@ -601,16 +640,12 @@ async def previous_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_id = candidate.telegram_id if candidate else None
 
     if candidate is None:
-        await query.message.reply_text(
+        await replace_callback_text(query,
             "Пока нет пропущенных анкет, к которым можно вернуться.",
             reply_markup=menu_markup(context.user_data.get("city_only", False), context.user_data.get("age_filter"), update.effective_user.id in ADMIN_IDS),
         )
         return
 
-    try:
-        await query.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
     keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("❤️ Нравится", callback_data=f"like:{target_id}"),
@@ -623,15 +658,22 @@ async def previous_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🏠 Главное меню", callback_data="menu:home")],
     ])
     if photo_id:
-        await context.bot.send_photo(chat_id=query.message.chat_id, photo=photo_id, caption=text, reply_markup=keyboard)
+        await replace_callback_photo(query, context, photo_id, text, reply_markup=keyboard)
     else:
-        await context.bot.send_message(chat_id=query.message.chat_id, text=text, reply_markup=keyboard)
+        await replace_callback_text(query, text, reply_markup=keyboard)
 
 
 async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("likes_inbox", None)
+    if update.callback_query:
+        await update.callback_query.answer()
+        try:
+            await update.callback_query.message.delete()
+        except Exception:
+            pass
+        await send_next(update.effective_chat.id, update.effective_user.id, context)
+        return
     await send_next(update.effective_chat.id, update.effective_user.id, context, update.effective_message)
-
 
 async def send_next_incoming(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE):
     load_search_preferences(user_id, context)
@@ -695,13 +737,18 @@ async def send_next_incoming(chat_id: int, user_id: int, context: ContextTypes.D
 async def incoming_likes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
     await send_next_incoming(query.message.chat_id, update.effective_user.id, context)
 
 
 async def card_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     action, target_raw = query.data.split(":", 1)
+    answer_text = {"report": "Жалоба принята.", "block": "Пользователь заблокирован."}.get(action)
+    await query.answer(answer_text or "")
     user_id = update.effective_user.id
     target_id = int(target_raw)
     matched = False
@@ -713,13 +760,13 @@ async def card_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with Session.begin() as db:
         own_profile = db.get(Profile, user_id)
         if own_profile is None:
-            await query.message.reply_text("Сначала создай анкету: /create")
+            await replace_callback_text(query, "Сначала создай анкету: /create")
             return
         own_name = own_profile.display_name
         own_share = own_profile.share_username
         target = db.get(Profile, target_id)
         if target is None:
-            await query.message.reply_text("Эта анкета больше недоступна.")
+            await replace_callback_text(query, "Эта анкета больше недоступна.")
             return
         target_name = target.display_name
         target_username = target.telegram_username
@@ -759,10 +806,6 @@ async def card_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as exc:
             logger.info("Could not notify user %s about an incoming like: %s", target_id, exc)
-    elif action == "report":
-        await query.message.reply_text("Жалоба принята. Анкета пропущена.")
-    elif action == "block":
-        await query.message.reply_text("Пользователь заблокирован и больше не появится в твоём просмотре.")
     try:
         await query.message.delete()
     except Exception:
@@ -921,7 +964,7 @@ async def admin_users_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = f"👥 Пользователи: {total}\nСтраница {page + 1} из {last_page + 1}"
     if total == 0:
         text += "\nПока никто не создал анкету."
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows))
+    await replace_callback_text(query, text, reply_markup=InlineKeyboardMarkup(rows))
 
 
 async def admin_user_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -951,7 +994,7 @@ async def admin_user_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "created_at": profile.created_at,
             }
     if details is None:
-        await query.edit_message_text(
+        await replace_callback_text(query,
             "Анкета не найдена.",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("↩️ К списку", callback_data=f"admin:users:{page}")
@@ -978,13 +1021,11 @@ async def admin_user_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🏠 Главное меню", callback_data="menu:home")],
     ])
     if details["photo"]:
-        await query.message.reply_photo(
-            photo=details["photo"],
-            caption=caption[:1024],
-            reply_markup=keyboard,
+        await replace_callback_photo(
+            query, context, details["photo"], caption[:1024], reply_markup=keyboard
         )
     else:
-        await query.edit_message_text(caption[:4000], reply_markup=keyboard)
+        await replace_callback_text(query, caption[:4000], reply_markup=keyboard)
 
 
 async def delete_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -995,18 +1036,20 @@ async def delete_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with Session() as db:
         exists = db.get(Profile, user_id) is not None
     if not exists:
-        await update.effective_message.reply_text(
+        await replace_callback_text(update.callback_query,
             "У тебя пока нет анкеты.",
             reply_markup=menu_markup(context.user_data.get("city_only", False), context.user_data.get("age_filter"), update.effective_user.id in ADMIN_IDS),
+            fallback_message=update.effective_message,
         )
         return
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🗑 Да, удалить", callback_data="delete:confirm")],
         [InlineKeyboardButton("↩️ Оставить анкету", callback_data="delete:cancel")],
     ])
-    await update.effective_message.reply_text(
+    await replace_callback_text(update.callback_query,
         "Удалить анкету? Вместе с ней будут удалены лайки, жалобы и блокировки, связанные с твоим профилем.",
         reply_markup=keyboard,
+        fallback_message=update.effective_message,
     )
 
 
@@ -1021,7 +1064,7 @@ async def delete_profile_confirm(update: Update, context: ContextTypes.DEFAULT_T
         db.execute(delete(Report).where(or_(Report.from_id == user_id, Report.to_id == user_id)))
         db.execute(delete(Profile).where(Profile.telegram_id == user_id))
     context.user_data.pop("likes_inbox", None)
-    await query.message.reply_text(
+    await replace_callback_text(query, 
         "Анкета и связанные с ней лайки удалены.",
         reply_markup=menu_markup(context.user_data.get("city_only", False), context.user_data.get("age_filter"), update.effective_user.id in ADMIN_IDS),
     )
@@ -1031,7 +1074,7 @@ async def delete_profile_cancel(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
     load_search_preferences(update.effective_user.id, context)
-    await query.message.reply_text(
+    await replace_callback_text(query, 
         "Анкета сохранена.",
         reply_markup=menu_markup(context.user_data.get("city_only", False), context.user_data.get("age_filter"), update.effective_user.id in ADMIN_IDS),
     )
@@ -1041,7 +1084,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("profile", None)
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.message.reply_text("Создание анкеты отменено.")
+        await replace_callback_text(update.callback_query, "Создание анкеты отменено.")
     else:
         await update.effective_message.reply_text("Создание анкеты отменено.")
     return ConversationHandler.END
