@@ -1,0 +1,397 @@
+import logging
+import os
+from datetime import datetime, timezone
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, delete, or_, select
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ConversationHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("gift_market_dating")
+
+AGE, NAME, CITY, GENDER, LOOKING_FOR, BIO, PHOTO, SHARE_USERNAME = range(8)
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Profile(Base):
+    __tablename__ = "profiles"
+
+    telegram_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(40))
+    age: Mapped[int] = mapped_column(Integer)
+    city: Mapped[str] = mapped_column(String(60))
+    gender: Mapped[str] = mapped_column(String(12), default="other")
+    looking_for: Mapped[str] = mapped_column(String(12), default="any")
+    bio: Mapped[str] = mapped_column(Text)
+    photo_file_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    share_username: Mapped[bool] = mapped_column(Boolean, default=False)
+    telegram_username: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class Vote(Base):
+    __tablename__ = "votes"
+    __table_args__ = (UniqueConstraint("from_id", "to_id", name="uq_vote_pair"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    from_id: Mapped[int] = mapped_column(ForeignKey("profiles.telegram_id", ondelete="CASCADE"))
+    to_id: Mapped[int] = mapped_column(ForeignKey("profiles.telegram_id", ondelete="CASCADE"))
+    action: Mapped[str] = mapped_column(String(12))
+
+
+class Block(Base):
+    __tablename__ = "blocks"
+    __table_args__ = (UniqueConstraint("from_id", "to_id", name="uq_block_pair"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    from_id: Mapped[int] = mapped_column(ForeignKey("profiles.telegram_id", ondelete="CASCADE"))
+    to_id: Mapped[int] = mapped_column(ForeignKey("profiles.telegram_id", ondelete="CASCADE"))
+
+
+class Report(Base):
+    __tablename__ = "reports"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    from_id: Mapped[int] = mapped_column(Integer)
+    to_id: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+def make_database():
+    url = os.getenv("DATABASE_URL", "sqlite:///gift_market_dating.sqlite3")
+    if url.startswith("postgres://"):
+        url = "postgresql+psycopg://" + url[len("postgres://"):]
+    elif url.startswith("postgresql://") and "+" not in url.split(":", 1)[0]:
+        url = "postgresql+psycopg://" + url[len("postgresql://"):]
+    options = {"pool_pre_ping": True}
+    if url.startswith("sqlite:"):
+        options["connect_args"] = {"check_same_thread": False}
+    engine = create_engine(url, **options)
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine, expire_on_commit=False)
+
+
+Session = make_database()
+
+
+def menu_markup():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📝 Создать / обновить анкету", callback_data="menu:create")],
+        [InlineKeyboardButton("🔎 Смотреть анкеты", callback_data="menu:next")],
+    ])
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    await message.reply_text(
+        "Привет! Это новый бот знакомств — тестовая версия для совершеннолетних.\n\n"
+        "Создай анкету, а затем смотри анкеты и отмечай симпатию. При взаимном лайке бот сообщит об этом обоим.\n\n"
+        "Анкеты видны другим пользователям бота. Telegram username показывается при совпадении только если ты отдельно разрешишь это. Используй /delete, чтобы удалить анкету.\n\n"
+        "Продолжая, подтверди, что тебе уже исполнилось 18 лет.",
+        reply_markup=menu_markup(),
+    )
+
+
+async def create_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.reply_text("Сколько тебе лет? Анкеты доступны только с 18 лет.")
+    else:
+        await update.effective_message.reply_text("Сколько тебе лет? Анкеты доступны только с 18 лет.")
+    return AGE
+
+
+async def age_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    value = (update.effective_message.text or "").strip()
+    if not value.isdigit():
+        await update.effective_message.reply_text("Напиши возраст числом, например 24.")
+        return AGE
+    age = int(value)
+    if age < 18:
+        await update.effective_message.reply_text("Создавать анкету можно только с 18 лет. Диалог остановлен.")
+        return ConversationHandler.END
+    if age > 99:
+        await update.effective_message.reply_text("Проверь возраст и введи число от 18 до 99.")
+        return AGE
+    context.user_data["profile"] = {"age": age}
+    await update.effective_message.reply_text("Как к тебе обращаться? Напиши имя или псевдоним (до 40 символов).")
+    return NAME
+
+
+async def name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    name = (update.effective_message.text or "").strip()
+    if not 2 <= len(name) <= 40:
+        await update.effective_message.reply_text("Имя должно быть от 2 до 40 символов. Попробуй ещё раз.")
+        return NAME
+    context.user_data["profile"]["display_name"] = name
+    await update.effective_message.reply_text("В каком ты городе?")
+    return CITY
+
+
+async def city_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    city = (update.effective_message.text or "").strip()
+    if not 2 <= len(city) <= 60:
+        await update.effective_message.reply_text("Напиши город (от 2 до 60 символов).")
+        return CITY
+    context.user_data["profile"]["city"] = city
+    await update.effective_message.reply_text("Как указать пол в анкете?", reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("Мужчина", callback_data="gender:man"), InlineKeyboardButton("Женщина", callback_data="gender:woman")],
+        [InlineKeyboardButton("Другое / не указывать", callback_data="gender:other")],
+    ]))
+    return GENDER
+
+
+async def gender_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data["profile"]["gender"] = query.data.split(":", 1)[1]
+    await query.edit_message_text("Кого ты хочешь видеть в анкетах?", reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("Мужчин", callback_data="looking_for:man"), InlineKeyboardButton("Женщин", callback_data="looking_for:woman")],
+        [InlineKeyboardButton("Всех", callback_data="looking_for:any")],
+    ]))
+    return LOOKING_FOR
+
+
+async def looking_for_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data["profile"]["looking_for"] = query.data.split(":", 1)[1]
+    await query.edit_message_text("Коротко расскажи о себе (до 500 символов). Не указывай адрес или другие личные данные.")
+    return BIO
+
+
+async def bio_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    bio = (update.effective_message.text or "").strip()
+    if not 2 <= len(bio) <= 500:
+        await update.effective_message.reply_text("Текст должен быть от 2 до 500 символов. Попробуй ещё раз.")
+        return BIO
+    context.user_data["profile"]["bio"] = bio
+    await update.effective_message.reply_text("Можно отправить одну фотографию для анкеты или написать «пропустить».")
+    return PHOTO
+
+
+async def photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_message.photo:
+        context.user_data["profile"]["photo_file_id"] = update.effective_message.photo[-1].file_id
+        await update.effective_message.reply_text("Разрешаешь показать свой Telegram username взаимной симпатии? Выбери ниже.", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Разрешаю показать", callback_data="share:yes")],
+            [InlineKeyboardButton("Не показывать", callback_data="share:no")],
+        ]))
+        return SHARE_USERNAME
+    if (update.effective_message.text or "").strip().lower() in {"пропустить", "нет", "skip"}:
+        context.user_data["profile"]["photo_file_id"] = None
+        await update.effective_message.reply_text("Разрешаешь показать свой Telegram username взаимной симпатии? Выбери ниже.", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Разрешаю показать", callback_data="share:yes")],
+            [InlineKeyboardButton("Не показывать", callback_data="share:no")],
+        ]))
+        return SHARE_USERNAME
+    await update.effective_message.reply_text("Отправь фотографию или напиши «пропустить».")
+    return PHOTO
+
+
+async def share_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    allow = query.data == "share:yes"
+    user = update.effective_user
+    values = context.user_data.pop("profile", {})
+    with Session.begin() as db:
+        profile = db.get(Profile, user.id)
+        if profile is None:
+            profile = Profile(telegram_id=user.id, **values)
+            db.add(profile)
+        else:
+            for key, value in values.items():
+                setattr(profile, key, value)
+        profile.share_username = allow
+        profile.telegram_username = user.username
+        db.execute(delete(Vote).where(or_(Vote.from_id == user.id, Vote.to_id == user.id)))
+    await query.edit_message_text("Анкета сохранена! Её увидят другие пользователи бота. Используй /next, чтобы начать просмотр.\n\nДля удаления анкеты — /delete.")
+    return ConversationHandler.END
+
+
+def card_text(profile: Profile):
+    gender_text = {"man": "мужчина", "woman": "женщина", "other": ""}.get(profile.gender, "")
+    details = f"{profile.display_name}, {profile.age}"
+    if gender_text:
+        details += f" · {gender_text}"
+    return f"{details} · {profile.city}\n\n{profile.bio}"
+
+
+async def send_next(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE, reply_to=None):
+    with Session() as db:
+        me = db.get(Profile, user_id)
+        if me is None:
+            msg = "Сначала создай анкету: /create"
+            if reply_to:
+                await reply_to.reply_text(msg)
+            else:
+                await context.bot.send_message(chat_id=chat_id, text=msg)
+            return
+        already_seen = select(Vote.to_id).where(Vote.from_id == user_id)
+        blocked = select(Block.to_id).where(Block.from_id == user_id).union(select(Block.from_id).where(Block.to_id == user_id))
+        gender_match = True if me.looking_for == "any" else Profile.gender == me.looking_for
+        preference_match = or_(Profile.looking_for == "any", Profile.looking_for == me.gender)
+        candidate = db.scalar(
+            select(Profile)
+            .where(Profile.telegram_id != user_id, Profile.telegram_id.not_in(already_seen), Profile.telegram_id.not_in(blocked), gender_match, preference_match)
+            .order_by(Profile.created_at.desc())
+            .limit(1)
+        )
+        if candidate is None:
+            msg = "Пока больше нет новых анкет. Загляни позже."
+            if reply_to:
+                await reply_to.reply_text(msg)
+            else:
+                await context.bot.send_message(chat_id=chat_id, text=msg)
+            return
+        text = card_text(candidate)
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("❤️ Нравится", callback_data=f"like:{candidate.telegram_id}"),
+            InlineKeyboardButton("👎 Пропустить", callback_data=f"pass:{candidate.telegram_id}"),
+        ], [
+            InlineKeyboardButton("🚩 Жалоба", callback_data=f"report:{candidate.telegram_id}"),
+            InlineKeyboardButton("⛔ Блокировать", callback_data=f"block:{candidate.telegram_id}"),
+        ]])
+        photo_id = candidate.photo_file_id
+    if photo_id:
+        await context.bot.send_photo(chat_id=chat_id, photo=photo_id, caption=text, reply_markup=keyboard)
+    else:
+        await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+
+
+async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_next(update.effective_chat.id, update.effective_user.id, context, update.effective_message)
+
+
+async def card_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    action, target_raw = query.data.split(":", 1)
+    user_id = update.effective_user.id
+    target_id = int(target_raw)
+    matched = False
+    target_name = ""
+    target_username = None
+    target_share = False
+    own_name = update.effective_user.first_name
+    own_share = False
+    with Session.begin() as db:
+        own_profile = db.get(Profile, user_id)
+        if own_profile is None:
+            await query.message.reply_text("Сначала создай анкету: /create")
+            return
+        own_name = own_profile.display_name
+        own_share = own_profile.share_username
+        target = db.get(Profile, target_id)
+        if target is None:
+            await query.message.reply_text("Эта анкета больше недоступна.")
+            return
+        target_name = target.display_name
+        target_username = target.telegram_username
+        target_share = target.share_username
+        if action == "report":
+            db.add(Report(from_id=user_id, to_id=target_id))
+            db.execute(delete(Vote).where(Vote.from_id == user_id, Vote.to_id == target_id))
+            db.add(Vote(from_id=user_id, to_id=target_id, action="pass"))
+        elif action == "block":
+            db.add(Block(from_id=user_id, to_id=target_id))
+            db.execute(delete(Vote).where(Vote.from_id == user_id, Vote.to_id == target_id))
+            db.add(Vote(from_id=user_id, to_id=target_id, action="pass"))
+        else:
+            vote = db.scalar(select(Vote).where(Vote.from_id == user_id, Vote.to_id == target_id))
+            if vote is None:
+                db.add(Vote(from_id=user_id, to_id=target_id, action="like" if action == "like" else "pass"))
+            else:
+                vote.action = "like" if action == "like" else "pass"
+            if action == "like":
+                reverse = db.scalar(select(Vote).where(Vote.from_id == target_id, Vote.to_id == user_id, Vote.action == "like"))
+                matched = reverse is not None
+    if action == "like" and matched:
+        own = update.effective_user
+        own_handle = own.username
+        other_contact = f"@{target_username}" if target_share and target_username else "Пользователь не разрешил показывать username или не указал его."
+        own_contact = f"@{own_handle}" if own_share and own_handle else "Пользователь не разрешил показывать username или не указал его."
+        await context.bot.send_message(user_id, f"🎉 Взаимная симпатия с {target_name}!\nКонтакт: {other_contact}")
+        await context.bot.send_message(target_id, f"🎉 Взаимная симпатия с {own_name}!\nКонтакт: {own_contact}")
+    elif action == "report":
+        await query.message.reply_text("Жалоба принята. Анкета пропущена.")
+    elif action == "block":
+        await query.message.reply_text("Пользователь заблокирован и больше не появится в твоём просмотре.")
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    await send_next(query.message.chat_id, user_id, context)
+
+
+async def delete_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    with Session.begin() as db:
+        db.execute(delete(Vote).where(or_(Vote.from_id == user_id, Vote.to_id == user_id)))
+        db.execute(delete(Block).where(or_(Block.from_id == user_id, Block.to_id == user_id)))
+        db.execute(delete(Report).where(or_(Report.from_id == user_id, Report.to_id == user_id)))
+        db.execute(delete(Profile).where(Profile.telegram_id == user_id))
+    await update.effective_message.reply_text("Анкета и связанные с ней лайки удалены.")
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("profile", None)
+    await update.effective_message.reply_text("Создание анкеты отменено.")
+    return ConversationHandler.END
+
+
+async def post_init(application: Application):
+    await application.bot.set_my_commands([
+        ("start", "Открыть меню"),
+        ("create", "Создать или обновить анкету"),
+        ("next", "Смотреть анкеты"),
+        ("delete", "Удалить свою анкету"),
+        ("cancel", "Отменить создание анкеты"),
+    ])
+
+
+def main():
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        raise RuntimeError("Set TELEGRAM_BOT_TOKEN in the environment before starting the bot.")
+    app = Application.builder().token(token).post_init(post_init).build()
+    profile_flow = ConversationHandler(
+        entry_points=[CommandHandler("create", create_start), CallbackQueryHandler(create_start, pattern="^menu:create$")],
+        states={
+            AGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, age_received)],
+            NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, name_received)],
+            CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, city_received)],
+            GENDER: [CallbackQueryHandler(gender_received, pattern="^gender:(man|woman|other)$")],
+            LOOKING_FOR: [CallbackQueryHandler(looking_for_received, pattern="^looking_for:(man|woman|any)$")],
+            BIO: [MessageHandler(filters.TEXT & ~filters.COMMAND, bio_received)],
+            PHOTO: [MessageHandler(filters.PHOTO | (filters.TEXT & ~filters.COMMAND), photo_received)],
+            SHARE_USERNAME: [CallbackQueryHandler(share_received, pattern="^share:(yes|no)$")],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(profile_flow)
+    app.add_handler(CommandHandler("next", next_command))
+    app.add_handler(CommandHandler("delete", delete_profile))
+    app.add_handler(CallbackQueryHandler(next_command, pattern="^menu:next$"))
+    app.add_handler(CallbackQueryHandler(card_action, pattern="^(like|pass|report|block):\\d+$"))
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
