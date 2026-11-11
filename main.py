@@ -101,6 +101,12 @@ def menu_markup(city_only=False):
     ])
 
 
+def cancel_markup(button_rows=None):
+    rows = list(button_rows or [])
+    rows.append([InlineKeyboardButton("❌ Отменить создание", callback_data="profile:cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
 async def home_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -138,46 +144,52 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def create_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.message.reply_text("Сколько тебе лет? Анкеты доступны только с 18 лет.")
+        await update.callback_query.message.reply_text(
+            "Сколько тебе лет? Анкеты доступны только с 18 лет.",
+            reply_markup=cancel_markup(),
+        )
     else:
-        await update.effective_message.reply_text("Сколько тебе лет? Анкеты доступны только с 18 лет.")
+        await update.effective_message.reply_text(
+            "Сколько тебе лет? Анкеты доступны только с 18 лет.",
+            reply_markup=cancel_markup(),
+        )
     return AGE
 
 
 async def age_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     value = (update.effective_message.text or "").strip()
     if not value.isdigit():
-        await update.effective_message.reply_text("Напиши возраст числом, например 24.")
+        await update.effective_message.reply_text("Напиши возраст числом, например 24.", reply_markup=cancel_markup())
         return AGE
     age = int(value)
     if age < 18:
         await update.effective_message.reply_text("Создавать анкету можно только с 18 лет. Диалог остановлен.")
         return ConversationHandler.END
     if age > 99:
-        await update.effective_message.reply_text("Проверь возраст и введи число от 18 до 99.")
+        await update.effective_message.reply_text("Проверь возраст и введи число от 18 до 99.", reply_markup=cancel_markup())
         return AGE
     context.user_data["profile"] = {"age": age}
-    await update.effective_message.reply_text("Как к тебе обращаться? Напиши имя или псевдоним (до 40 символов).")
+    await update.effective_message.reply_text("Как к тебе обращаться? Напиши имя или псевдоним (до 40 символов).", reply_markup=cancel_markup())
     return NAME
 
 
 async def name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = (update.effective_message.text or "").strip()
     if not 2 <= len(name) <= 40:
-        await update.effective_message.reply_text("Имя должно быть от 2 до 40 символов. Попробуй ещё раз.")
+        await update.effective_message.reply_text("Имя должно быть от 2 до 40 символов. Попробуй ещё раз.", reply_markup=cancel_markup())
         return NAME
     context.user_data["profile"]["display_name"] = name
-    await update.effective_message.reply_text("В каком ты городе?")
+    await update.effective_message.reply_text("В каком ты городе?", reply_markup=cancel_markup())
     return CITY
 
 
 async def city_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     city = (update.effective_message.text or "").strip()
     if not 2 <= len(city) <= 60:
-        await update.effective_message.reply_text("Напиши город (от 2 до 60 символов).")
+        await update.effective_message.reply_text("Напиши город (от 2 до 60 символов).", reply_markup=cancel_markup())
         return CITY
     context.user_data["profile"]["city"] = city
-    await update.effective_message.reply_text("Как указать пол в анкете?", reply_markup=InlineKeyboardMarkup([
+    await update.effective_message.reply_text("Как указать пол в анкете?", reply_markup=cancel_markup([
         [InlineKeyboardButton("Мужчина", callback_data="gender:man"), InlineKeyboardButton("Женщина", callback_data="gender:woman")],
         [InlineKeyboardButton("Другое / не указывать", callback_data="gender:other")],
     ]))
@@ -188,7 +200,7 @@ async def gender_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     context.user_data["profile"]["gender"] = query.data.split(":", 1)[1]
-    await query.edit_message_text("Кого ты хочешь видеть в анкетах?", reply_markup=InlineKeyboardMarkup([
+    await query.edit_message_text("Кого ты хочешь видеть в анкетах?", reply_markup=cancel_markup([
         [InlineKeyboardButton("Мужчин", callback_data="looking_for:man"), InlineKeyboardButton("Женщин", callback_data="looking_for:woman")],
         [InlineKeyboardButton("Всех", callback_data="looking_for:any")],
     ]))
@@ -199,36 +211,57 @@ async def looking_for_received(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     context.user_data["profile"]["looking_for"] = query.data.split(":", 1)[1]
-    await query.edit_message_text("Коротко расскажи о себе (до 500 символов). Не указывай адрес или другие личные данные.")
+    await query.edit_message_text(
+        "Коротко расскажи о себе (до 500 символов). Не указывай адрес или другие личные данные.",
+        reply_markup=cancel_markup(),
+    )
     return BIO
 
 
 async def bio_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bio = (update.effective_message.text or "").strip()
     if not 2 <= len(bio) <= 500:
-        await update.effective_message.reply_text("Текст должен быть от 2 до 500 символов. Попробуй ещё раз.")
+        await update.effective_message.reply_text("Текст должен быть от 2 до 500 символов. Попробуй ещё раз.", reply_markup=cancel_markup())
         return BIO
     context.user_data["profile"]["bio"] = bio
-    await update.effective_message.reply_text("Можно отправить одну фотографию для анкеты или написать «пропустить».")
+    await update.effective_message.reply_text(
+        "Можно отправить одну фотографию или пропустить этот шаг.",
+        reply_markup=cancel_markup([[InlineKeyboardButton("Пропустить фото", callback_data="photo:skip")]]),
+    )
     return PHOTO
 
 
 async def photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        context.user_data["profile"]["photo_file_id"] = None
+        await query.edit_message_text(
+            "Разрешаешь показать свой Telegram username взаимной симпатии? Выбери ниже.",
+            reply_markup=cancel_markup([
+                [InlineKeyboardButton("Разрешаю показать", callback_data="share:yes")],
+                [InlineKeyboardButton("Не показывать", callback_data="share:no")],
+            ]),
+        )
+        return SHARE_USERNAME
     if update.effective_message.photo:
         context.user_data["profile"]["photo_file_id"] = update.effective_message.photo[-1].file_id
-        await update.effective_message.reply_text("Разрешаешь показать свой Telegram username взаимной симпатии? Выбери ниже.", reply_markup=InlineKeyboardMarkup([
+        await update.effective_message.reply_text("Разрешаешь показать свой Telegram username взаимной симпатии? Выбери ниже.", reply_markup=cancel_markup([
             [InlineKeyboardButton("Разрешаю показать", callback_data="share:yes")],
             [InlineKeyboardButton("Не показывать", callback_data="share:no")],
         ]))
         return SHARE_USERNAME
     if (update.effective_message.text or "").strip().lower() in {"пропустить", "нет", "skip"}:
         context.user_data["profile"]["photo_file_id"] = None
-        await update.effective_message.reply_text("Разрешаешь показать свой Telegram username взаимной симпатии? Выбери ниже.", reply_markup=InlineKeyboardMarkup([
+        await update.effective_message.reply_text("Разрешаешь показать свой Telegram username взаимной симпатии? Выбери ниже.", reply_markup=cancel_markup([
             [InlineKeyboardButton("Разрешаю показать", callback_data="share:yes")],
             [InlineKeyboardButton("Не показывать", callback_data="share:no")],
         ]))
         return SHARE_USERNAME
-    await update.effective_message.reply_text("Отправь фотографию или напиши «пропустить».")
+    await update.effective_message.reply_text(
+        "Отправь фотографию или нажми «Пропустить фото».",
+        reply_markup=cancel_markup([[InlineKeyboardButton("Пропустить фото", callback_data="photo:skip")]]),
+    )
     return PHOTO
 
 
@@ -671,7 +704,11 @@ async def delete_profile_cancel(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("profile", None)
-    await update.effective_message.reply_text("Создание анкеты отменено.")
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.reply_text("Создание анкеты отменено.")
+    else:
+        await update.effective_message.reply_text("Создание анкеты отменено.")
     return ConversationHandler.END
 
 
@@ -712,10 +749,16 @@ def main():
             GENDER: [CallbackQueryHandler(gender_received, pattern="^gender:(man|woman|other)$")],
             LOOKING_FOR: [CallbackQueryHandler(looking_for_received, pattern="^looking_for:(man|woman|any)$")],
             BIO: [MessageHandler(filters.TEXT & ~filters.COMMAND, bio_received)],
-            PHOTO: [MessageHandler(filters.PHOTO | (filters.TEXT & ~filters.COMMAND), photo_received)],
+            PHOTO: [
+                CallbackQueryHandler(photo_received, pattern="^photo:skip$"),
+                MessageHandler(filters.PHOTO | (filters.TEXT & ~filters.COMMAND), photo_received),
+            ],
             SHARE_USERNAME: [CallbackQueryHandler(share_received, pattern="^share:(yes|no)$")],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            CallbackQueryHandler(cancel, pattern="^profile:cancel$"),
+        ],
         allow_reentry=True,
     )
     app.add_handler(CommandHandler("start", start))
