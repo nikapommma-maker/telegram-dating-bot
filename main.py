@@ -367,7 +367,6 @@ async def share_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 setattr(profile, key, value)
         profile.share_username = allow
         profile.telegram_username = user.username if allow else None
-        db.execute(delete(Vote).where(or_(Vote.from_id == user.id, Vote.to_id == user.id)))
     await query.edit_message_text("Анкета сохранена! Её увидят другие пользователи бота. Используй /next, чтобы начать просмотр.\n\nДля удаления анкеты — /delete.")
     return ConversationHandler.END
 
