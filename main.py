@@ -5,7 +5,7 @@ from collections import Counter
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, delete, or_, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommandScopeChat, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -437,14 +437,24 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def post_init(application: Application):
-    await application.bot.set_my_commands([
+    public_commands = [
         ("start", "Открыть меню"),
         ("create", "Создать или обновить анкету"),
         ("next", "Смотреть анкеты"),
         ("delete", "Удалить свою анкету"),
         ("cancel", "Отменить создание анкеты"),
         ("myid", "Показать свой Telegram ID"),
-    ])
+    ]
+    admin_commands = public_commands + [
+        ("reports", "Просмотреть жалобы"),
+        ("removeprofile", "Удалить анкету по ID"),
+    ]
+    await application.bot.set_my_commands(public_commands)
+    for admin_id in ADMIN_IDS:
+        await application.bot.set_my_commands(
+            admin_commands,
+            scope=BotCommandScopeChat(chat_id=admin_id),
+        )
 
 
 def main():
