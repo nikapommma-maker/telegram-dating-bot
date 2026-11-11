@@ -253,6 +253,15 @@ async def send_next(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TY
             .order_by(Profile.created_at.desc())
             .limit(1)
         )
+        fallback_used = False
+        if candidate is None:
+            candidate = db.scalar(
+                select(Profile)
+                .where(Profile.telegram_id != user_id, Profile.telegram_id.not_in(already_seen), Profile.telegram_id.not_in(blocked))
+                .order_by(Profile.created_at.desc())
+                .limit(1)
+            )
+            fallback_used = candidate is not None
         if candidate is None:
             msg = "Пока больше нет новых анкет. Загляни позже."
             if reply_to:
@@ -261,6 +270,8 @@ async def send_next(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TY
                 await context.bot.send_message(chat_id=chat_id, text=msg)
             return
         text = card_text(candidate)
+        if fallback_used:
+            text = "Подходящих по выбранным настройкам пока нет — показываю другие анкеты." + chr(10) + chr(10) + text
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("❤️ Нравится", callback_data=f"like:{candidate.telegram_id}"),
             InlineKeyboardButton("👎 Пропустить", callback_data=f"pass:{candidate.telegram_id}"),
@@ -273,7 +284,6 @@ async def send_next(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TY
         await context.bot.send_photo(chat_id=chat_id, photo=photo_id, caption=text, reply_markup=keyboard)
     else:
         await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
-
 
 async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_next(update.effective_chat.id, update.effective_user.id, context, update.effective_message)
