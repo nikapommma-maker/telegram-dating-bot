@@ -3,7 +3,7 @@ import os
 from datetime import datetime, timezone
 from collections import Counter
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, delete, or_, select
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, delete, func, or_, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from telegram import BotCommandScopeChat, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -89,11 +89,13 @@ def make_database():
 Session = make_database()
 
 
-def menu_markup():
+def menu_markup(city_only=False):
+    city_label = "📍 Поиск: мой город ✓" if city_only else "🌍 Поиск: все города"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔎 Смотреть анкеты", callback_data="menu:next")],
         [InlineKeyboardButton("👤 Моя анкета", callback_data="menu:profile"),
          InlineKeyboardButton("💞 Взаимные симпатии", callback_data="menu:matches")],
+        [InlineKeyboardButton(city_label, callback_data="menu:city")],
         [InlineKeyboardButton("📝 Создать / обновить анкету", callback_data="menu:create")],
     ])
 
@@ -101,7 +103,22 @@ def menu_markup():
 async def home_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.message.reply_text("Главное меню — выбери действие:", reply_markup=menu_markup())
+    await query.message.reply_text(
+        "Главное меню — выбери действие:",
+        reply_markup=menu_markup(context.user_data.get("city_only", False)),
+    )
+
+
+async def toggle_city_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    city_only = not context.user_data.get("city_only", False)
+    context.user_data["city_only"] = city_only
+    label = "только в твоём городе" if city_only else "по всем городам"
+    await query.message.reply_text(
+        f"Поиск анкет настроен: {label}.",
+        reply_markup=menu_markup(city_only),
+    )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -111,7 +128,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Создай анкету, а затем смотри анкеты и отмечай симпатию. При взаимном лайке бот сообщит об этом обоим.\n\n"
         "Анкеты видны другим пользователям бота. Telegram username показывается при совпадении только если ты отдельно разрешишь это. Используй /delete, чтобы удалить анкету.\n\n"
         "Продолжая, подтверди, что тебе уже исполнилось 18 лет.",
-        reply_markup=menu_markup(),
+        reply_markup=menu_markup(context.user_data.get("city_only", False)),
     )
 
 
@@ -273,7 +290,7 @@ async def matches_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with Session() as db:
         own = db.get(Profile, user_id)
         if own is None:
-            await update.effective_message.reply_text("Сначала создай анкету: /create", reply_markup=menu_markup())
+            await update.effective_message.reply_text("Сначала создай анкету: /create", reply_markup=menu_markup(context.user_data.get("city_only", False)))
             return
         liked_by_me = set(db.scalars(
             select(Vote.to_id).where(Vote.from_id == user_id, Vote.action == "like")
@@ -291,9 +308,9 @@ async def matches_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 lines.append(f"• {profile.display_name} — контакт не открыт")
     if not lines:
-        await update.effective_message.reply_text("Пока нет взаимных симпатий. Продолжай смотреть анкеты: /next", reply_markup=menu_markup())
+        await update.effective_message.reply_text("Пока нет взаимных симпатий. Продолжай смотреть анкеты: /next", reply_markup=menu_markup(context.user_data.get("city_only", False)))
         return
-    await update.effective_message.reply_text("Твои взаимные симпатии:\n\n" + "\n".join(lines), reply_markup=menu_markup())
+    await update.effective_message.reply_text("Твои взаимные симпатии:\n\n" + "\n".join(lines), reply_markup=menu_markup(context.user_data.get("city_only", False)))
 
 
 async def send_next(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE, reply_to=None):
@@ -310,14 +327,21 @@ async def send_next(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TY
         blocked = select(Block.to_id).where(Block.from_id == user_id).union(select(Block.from_id).where(Block.to_id == user_id))
         gender_match = True if me.looking_for == "any" else Profile.gender == me.looking_for
         preference_match = or_(Profile.looking_for == "any", Profile.looking_for == me.gender)
-        candidate = db.scalar(
-            select(Profile)
-            .where(Profile.telegram_id != user_id, Profile.telegram_id.not_in(already_seen), Profile.telegram_id.not_in(blocked), gender_match, preference_match)
-            .order_by(Profile.created_at.desc())
-            .limit(1)
+        candidate_query = select(Profile).where(
+            Profile.telegram_id != user_id,
+            Profile.telegram_id.not_in(already_seen),
+            Profile.telegram_id.not_in(blocked),
+            gender_match,
+            preference_match,
         )
+        city_only = context.user_data.get("city_only", False)
+        if city_only:
+            candidate_query = candidate_query.where(
+                func.lower(func.trim(Profile.city)) == me.city.strip().lower()
+            )
+        candidate = db.scalar(candidate_query.order_by(Profile.created_at.desc()).limit(1))
         fallback_used = False
-        if candidate is None:
+        if candidate is None and not city_only:
             candidate = db.scalar(
                 select(Profile)
                 .where(Profile.telegram_id != user_id, Profile.telegram_id.not_in(already_seen), Profile.telegram_id.not_in(blocked))
@@ -326,11 +350,15 @@ async def send_next(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TY
             )
             fallback_used = candidate is not None
         if candidate is None:
-            msg = "Пока больше нет новых анкет. Загляни позже."
+            msg = (
+                "В твоём городе новых анкет пока нет. Можно отключить фильтр в главном меню."
+                if city_only else
+                "Пока больше нет новых анкет. Загляни позже."
+            )
             if reply_to:
-                await reply_to.reply_text(msg, reply_markup=menu_markup())
+                await reply_to.reply_text(msg, reply_markup=menu_markup(context.user_data.get("city_only", False)))
             else:
-                await context.bot.send_message(chat_id=chat_id, text=msg, reply_markup=menu_markup())
+                await context.bot.send_message(chat_id=chat_id, text=msg, reply_markup=menu_markup(context.user_data.get("city_only", False)))
             return
         text = card_text(candidate)
         if fallback_used:
@@ -584,6 +612,7 @@ def main():
     app.add_handler(CallbackQueryHandler(my_profile, pattern="^menu:profile$"))
     app.add_handler(CallbackQueryHandler(matches_command, pattern="^menu:matches$"))
     app.add_handler(CallbackQueryHandler(home_menu, pattern="^menu:home$"))
+    app.add_handler(CallbackQueryHandler(toggle_city_search, pattern="^menu:city$"))
     app.add_handler(CallbackQueryHandler(card_action, pattern="^(like|pass|report|block):\\d+$"))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
