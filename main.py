@@ -359,16 +359,18 @@ async def reports_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with Session() as db:
         reported_ids = db.scalars(select(Report.to_id).order_by(Report.created_at.desc()).limit(200)).all()
         counts = Counter(reported_ids)
-        rows = []
+        cards = []
+        buttons = []
         for target_id, count in counts.most_common(10):
             profile = db.get(Profile, target_id)
             if profile is not None:
-                rows.append(f"• ID {target_id}: {profile.display_name}, {profile.age}, {profile.city} — жалоб: {count}")
-    if not rows:
+                cards.append(f"• ID {target_id}: {profile.display_name}, {profile.age}, {profile.city} — жалоб: {count}")
+                buttons.append([InlineKeyboardButton(f"Удалить анкету {target_id}", callback_data=f"mod:ask_remove:{target_id}")])
+    if not cards:
         await message.reply_text("Новых жалоб нет.")
         return
-    await message.reply_text("Жалобы на анкеты (до 10, по числу обращений):" + chr(10) + chr(10) + chr(10).join(rows))
-
+    text = "Жалобы на анкеты (до 10, по числу обращений):" + chr(10) + chr(10) + chr(10).join(cards)
+    await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 async def remove_profile_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
@@ -403,6 +405,20 @@ async def moderation_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     _, action, target_raw = query.data.split(":", 2)
     target_id = int(target_raw)
+    if action == "ask_remove":
+        with Session() as db:
+            profile = db.get(Profile, target_id)
+            display_name = profile.display_name if profile is not None else None
+        if display_name is None:
+            await query.edit_message_text("Анкета уже удалена.")
+            return
+        context.user_data["pending_admin_remove"] = target_id
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Подтвердить удаление", callback_data=f"mod:confirm_remove:{target_id}"),
+            InlineKeyboardButton("Отмена", callback_data=f"mod:cancel:{target_id}"),
+        ]])
+        await query.edit_message_text(f"Удалить анкету «{display_name}» (ID {target_id}) и связанные отметки?", reply_markup=keyboard)
+        return
     if action == "cancel":
         if context.user_data.get("pending_admin_remove") == target_id:
             context.user_data.pop("pending_admin_remove", None)
@@ -484,7 +500,7 @@ def main():
     app.add_handler(CommandHandler("myid", my_id))
     app.add_handler(CommandHandler("reports", reports_command))
     app.add_handler(CommandHandler("removeprofile", remove_profile_admin))
-    app.add_handler(CallbackQueryHandler(moderation_action, pattern="^mod:(confirm_remove|cancel):\\d+$"))
+    app.add_handler(CallbackQueryHandler(moderation_action, pattern="^mod:(ask_remove|confirm_remove|cancel):\\d+$"))
     app.add_handler(CallbackQueryHandler(next_command, pattern="^menu:next$"))
     app.add_handler(CallbackQueryHandler(card_action, pattern="^(like|pass|report|block):\\d+$"))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
