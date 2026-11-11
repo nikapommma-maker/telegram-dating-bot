@@ -91,8 +91,10 @@ Session = make_database()
 
 def menu_markup():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📝 Создать / обновить анкету", callback_data="menu:create")],
         [InlineKeyboardButton("🔎 Смотреть анкеты", callback_data="menu:next")],
+        [InlineKeyboardButton("👤 Моя анкета", callback_data="menu:profile"),
+         InlineKeyboardButton("💞 Взаимные симпатии", callback_data="menu:matches")],
+        [InlineKeyboardButton("📝 Создать / обновить анкету", callback_data="menu:create")],
     ])
 
 
@@ -231,6 +233,58 @@ def card_text(profile: Profile):
     if gender_text:
         details += f" · {gender_text}"
     return f"{details} · {profile.city}\n\n{profile.bio}"
+
+
+async def my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        await update.callback_query.answer()
+    user_id = update.effective_user.id
+    with Session() as db:
+        profile = db.get(Profile, user_id)
+        if profile is None:
+            await update.effective_message.reply_text("Анкеты пока нет. Создай её: /create")
+            return
+        text = "Твоя анкета:\n\n" + card_text(profile)
+        photo_id = profile.photo_file_id
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📝 Изменить анкету", callback_data="menu:create")],
+        [InlineKeyboardButton("🔎 Смотреть анкеты", callback_data="menu:next")],
+        [InlineKeyboardButton("💞 Взаимные симпатии", callback_data="menu:matches")],
+    ])
+    if photo_id:
+        await update.effective_message.reply_photo(photo=photo_id, caption=text, reply_markup=keyboard)
+    else:
+        await update.effective_message.reply_text(text, reply_markup=keyboard)
+
+
+async def matches_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        await update.callback_query.answer()
+    user_id = update.effective_user.id
+    with Session() as db:
+        own = db.get(Profile, user_id)
+        if own is None:
+            await update.effective_message.reply_text("Сначала создай анкету: /create")
+            return
+        liked_by_me = set(db.scalars(
+            select(Vote.to_id).where(Vote.from_id == user_id, Vote.action == "like")
+        ).all())
+        liked_me = set(db.scalars(
+            select(Vote.from_id).where(Vote.to_id == user_id, Vote.action == "like")
+        ).all())
+        matches = db.scalars(
+            select(Profile).where(Profile.telegram_id.in_(liked_by_me & liked_me)).order_by(Profile.created_at.desc())
+        ).all()
+        lines = []
+        for profile in matches:
+            if profile.share_username and profile.telegram_username:
+                lines.append(f"• {profile.display_name} — @{profile.telegram_username}")
+            else:
+                lines.append(f"• {profile.display_name} — контакт не открыт")
+    if not lines:
+        await update.effective_message.reply_text("Пока нет взаимных симпатий. Продолжай смотреть анкеты: /next")
+        return
+    await update.effective_message.reply_text("Твои взаимные симпатии:\n\n" + "\n".join(lines))
 
 
 async def send_next(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE, reply_to=None):
@@ -467,6 +521,8 @@ async def post_init(application: Application):
         ("start", "Открыть меню"),
         ("create", "Создать или обновить анкету"),
         ("next", "Смотреть анкеты"),
+        ("myprofile", "Моя анкета"),
+        ("matches", "Взаимные симпатии"),
         ("delete", "Удалить свою анкету"),
         ("cancel", "Отменить создание анкеты"),
         ("myid", "Показать свой Telegram ID"),
@@ -506,12 +562,16 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(profile_flow)
     app.add_handler(CommandHandler("next", next_command))
+    app.add_handler(CommandHandler("myprofile", my_profile))
+    app.add_handler(CommandHandler("matches", matches_command))
     app.add_handler(CommandHandler("delete", delete_profile))
     app.add_handler(CommandHandler("myid", my_id))
     app.add_handler(CommandHandler("reports", reports_command))
     app.add_handler(CommandHandler("removeprofile", remove_profile_admin))
     app.add_handler(CallbackQueryHandler(moderation_action, pattern="^mod:(ask_remove|confirm_remove|cancel):\\d+$"))
     app.add_handler(CallbackQueryHandler(next_command, pattern="^menu:next$"))
+    app.add_handler(CallbackQueryHandler(my_profile, pattern="^menu:profile$"))
+    app.add_handler(CallbackQueryHandler(matches_command, pattern="^menu:matches$"))
     app.add_handler(CallbackQueryHandler(card_action, pattern="^(like|pass|report|block):\\d+$"))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
