@@ -407,6 +407,8 @@ async def send_next(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TY
             InlineKeyboardButton("🚩 Жалоба", callback_data=f"report:{candidate.telegram_id}"),
             InlineKeyboardButton("⛔ Блокировать", callback_data=f"block:{candidate.telegram_id}"),
         ], [
+            InlineKeyboardButton("↩️ Вернуть пропущенную", callback_data="card:back"),
+        ], [
             InlineKeyboardButton("🏠 Главное меню", callback_data="menu:home"),
         ]])
         photo_id = candidate.photo_file_id
@@ -414,6 +416,67 @@ async def send_next(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TY
         await context.bot.send_photo(chat_id=chat_id, photo=photo_id, caption=text, reply_markup=keyboard)
     else:
         await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+
+async def previous_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data.pop("likes_inbox", None)
+    user_id = update.effective_user.id
+    with Session() as db:
+        me = db.get(Profile, user_id)
+        if me is None:
+            await query.message.reply_text("Сначала создай анкету: /create")
+            return
+        blocked = select(Block.to_id).where(Block.from_id == user_id).union(
+            select(Block.from_id).where(Block.to_id == user_id)
+        )
+        reported = select(Report.to_id).where(Report.from_id == user_id)
+        previous_query = (
+            select(Profile)
+            .join(Vote, Vote.to_id == Profile.telegram_id)
+            .where(
+                Vote.from_id == user_id,
+                Vote.action == "pass",
+                Profile.telegram_id.not_in(blocked),
+                Profile.telegram_id.not_in(reported),
+            )
+        )
+        if context.user_data.get("city_only", False):
+            previous_query = previous_query.where(
+                func.lower(func.trim(Profile.city)) == me.city.strip().lower()
+            )
+        candidate = db.scalar(previous_query.order_by(Vote.id.desc()).limit(1))
+        photo_id = candidate.photo_file_id if candidate else None
+        text = "↩️ Последняя пропущенная анкета\n\n" + card_text(candidate) if candidate else None
+        target_id = candidate.telegram_id if candidate else None
+
+    if candidate is None:
+        await query.message.reply_text(
+            "Пока нет пропущенных анкет, к которым можно вернуться.",
+            reply_markup=menu_markup(context.user_data.get("city_only", False)),
+        )
+        return
+
+    try:
+        await query.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("❤️ Нравится", callback_data=f"like:{target_id}"),
+            InlineKeyboardButton("👎 Пропустить", callback_data=f"pass:{target_id}"),
+        ],
+        [
+            InlineKeyboardButton("🚩 Жалоба", callback_data=f"report:{target_id}"),
+            InlineKeyboardButton("⛔ Блокировать", callback_data=f"block:{target_id}"),
+        ],
+        [InlineKeyboardButton("🏠 Главное меню", callback_data="menu:home")],
+    ])
+    if photo_id:
+        await context.bot.send_photo(chat_id=query.message.chat_id, photo=photo_id, caption=text, reply_markup=keyboard)
+    else:
+        await context.bot.send_message(chat_id=query.message.chat_id, text=text, reply_markup=keyboard)
+
 
 async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("likes_inbox", None)
@@ -780,6 +843,7 @@ def main():
     app.add_handler(CallbackQueryHandler(delete_profile_confirm, pattern="^delete:confirm$"))
     app.add_handler(CallbackQueryHandler(delete_profile_cancel, pattern="^delete:cancel$"))
     app.add_handler(CallbackQueryHandler(toggle_city_search, pattern="^menu:city$"))
+    app.add_handler(CallbackQueryHandler(previous_profile, pattern="^card:back$"))
     app.add_handler(CallbackQueryHandler(card_action, pattern="^(like|pass|report|block):\\d+$"))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
