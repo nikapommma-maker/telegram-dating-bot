@@ -278,6 +278,7 @@ async def my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📝 Изменить анкету", callback_data="menu:create")],
         [InlineKeyboardButton("🔎 Смотреть анкеты", callback_data="menu:next")],
         [InlineKeyboardButton("💞 Взаимные симпатии", callback_data="menu:matches")],
+        [InlineKeyboardButton("🗑 Удалить анкету", callback_data="menu:delete")],
         [InlineKeyboardButton("🏠 Главное меню", callback_data="menu:home")],
     ])
     if photo_id:
@@ -622,13 +623,50 @@ async def moderation_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def delete_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        await update.callback_query.answer()
+    user_id = update.effective_user.id
+    with Session() as db:
+        exists = db.get(Profile, user_id) is not None
+    if not exists:
+        await update.effective_message.reply_text(
+            "У тебя пока нет анкеты.",
+            reply_markup=menu_markup(context.user_data.get("city_only", False)),
+        )
+        return
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑 Да, удалить", callback_data="delete:confirm")],
+        [InlineKeyboardButton("↩️ Оставить анкету", callback_data="delete:cancel")],
+    ])
+    await update.effective_message.reply_text(
+        "Удалить анкету? Вместе с ней будут удалены лайки, жалобы и блокировки, связанные с твоим профилем.",
+        reply_markup=keyboard,
+    )
+
+
+async def delete_profile_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
     user_id = update.effective_user.id
     with Session.begin() as db:
         db.execute(delete(Vote).where(or_(Vote.from_id == user_id, Vote.to_id == user_id)))
         db.execute(delete(Block).where(or_(Block.from_id == user_id, Block.to_id == user_id)))
         db.execute(delete(Report).where(or_(Report.from_id == user_id, Report.to_id == user_id)))
         db.execute(delete(Profile).where(Profile.telegram_id == user_id))
-    await update.effective_message.reply_text("Анкета и связанные с ней лайки удалены.")
+    context.user_data.pop("likes_inbox", None)
+    await query.message.reply_text(
+        "Анкета и связанные с ней лайки удалены.",
+        reply_markup=menu_markup(context.user_data.get("city_only", False)),
+    )
+
+
+async def delete_profile_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text(
+        "Анкета сохранена.",
+        reply_markup=menu_markup(context.user_data.get("city_only", False)),
+    )
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -695,6 +733,9 @@ def main():
     app.add_handler(CallbackQueryHandler(matches_command, pattern="^menu:matches$"))
     app.add_handler(CallbackQueryHandler(incoming_likes, pattern="^menu:likes$"))
     app.add_handler(CallbackQueryHandler(home_menu, pattern="^menu:home$"))
+    app.add_handler(CallbackQueryHandler(delete_profile, pattern="^menu:delete$"))
+    app.add_handler(CallbackQueryHandler(delete_profile_confirm, pattern="^delete:confirm$"))
+    app.add_handler(CallbackQueryHandler(delete_profile_cancel, pattern="^delete:cancel$"))
     app.add_handler(CallbackQueryHandler(toggle_city_search, pattern="^menu:city$"))
     app.add_handler(CallbackQueryHandler(card_action, pattern="^(like|pass|report|block):\\d+$"))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
