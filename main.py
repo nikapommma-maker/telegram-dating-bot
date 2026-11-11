@@ -500,6 +500,17 @@ async def card_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         own_contact = f"@{own_handle}" if own_share and own_handle else "Пользователь не разрешил показывать username или не указал его."
         await context.bot.send_message(user_id, f"🎉 Взаимная симпатия с {target_name}!\nКонтакт: {other_contact}")
         await context.bot.send_message(target_id, f"🎉 Взаимная симпатия с {own_name}!\nКонтакт: {own_contact}")
+    elif action == "like":
+        try:
+            await context.bot.send_message(
+                chat_id=target_id,
+                text="💌 Кто-то поставил лайк твоей анкете. Открой входящие симпатии, чтобы посмотреть анкету.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❤️ Посмотреть лайк", callback_data="menu:likes")
+                ]]),
+            )
+        except Exception as exc:
+            logger.info("Could not notify user %s about an incoming like: %s", target_id, exc)
     elif action == "report":
         await query.message.reply_text("Жалоба принята. Анкета пропущена.")
     elif action == "block":
