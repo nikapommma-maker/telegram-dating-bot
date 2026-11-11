@@ -89,13 +89,27 @@ def make_database():
 Session = make_database()
 
 
-def menu_markup(city_only=False):
+AGE_FILTER_LABELS = {
+    "18-25": "18–25",
+    "26-35": "26–35",
+    "36-49": "36–49",
+    "50plus": "50+",
+}
+
+
+def age_filter_label(age_filter):
+    return AGE_FILTER_LABELS.get(age_filter, "любой")
+
+
+def menu_markup(city_only=False, age_filter=None):
     city_label = "📍 Поиск: мой город ✓" if city_only else "🌍 Поиск: все города"
+    age_label = f"🎂 Возраст: {age_filter_label(age_filter)}"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔎 Смотреть анкеты", callback_data="menu:next")],
         [InlineKeyboardButton("👤 Моя анкета", callback_data="menu:profile"),
          InlineKeyboardButton("💞 Взаимные симпатии", callback_data="menu:matches")],
         [InlineKeyboardButton(city_label, callback_data="menu:city")],
+        [InlineKeyboardButton(age_label, callback_data="menu:age")],
         [InlineKeyboardButton("❤️ Кто лайкнул меня", callback_data="menu:likes")],
         [InlineKeyboardButton("📝 Создать / обновить анкету", callback_data="menu:create")],
     ])
@@ -113,7 +127,43 @@ async def home_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("likes_inbox", None)
     await query.message.reply_text(
         "Главное меню — выбери действие:",
-        reply_markup=menu_markup(context.user_data.get("city_only", False)),
+        reply_markup=menu_markup(context.user_data.get("city_only", False), context.user_data.get("age_filter")),
+    )
+
+
+async def age_filter_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("18–25", callback_data="age:set:18-25"),
+            InlineKeyboardButton("26–35", callback_data="age:set:26-35"),
+        ],
+        [
+            InlineKeyboardButton("36–49", callback_data="age:set:36-49"),
+            InlineKeyboardButton("50+", callback_data="age:set:50plus"),
+        ],
+        [InlineKeyboardButton("Любой возраст", callback_data="age:set:any")],
+        [InlineKeyboardButton("↩️ Главное меню", callback_data="menu:home")],
+    ])
+    await query.message.reply_text(
+        f"Выбери возраст анкет. Сейчас: {age_filter_label(context.user_data.get('age_filter'))}.",
+        reply_markup=keyboard,
+    )
+
+
+async def set_age_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    selected = query.data.split(":", 2)[2]
+    context.user_data["age_filter"] = None if selected == "any" else selected
+    label = age_filter_label(context.user_data.get("age_filter"))
+    await query.message.reply_text(
+        f"Возрастной фильтр: {label}.",
+        reply_markup=menu_markup(
+            context.user_data.get("city_only", False),
+            context.user_data.get("age_filter"),
+        ),
     )
 
 
@@ -125,7 +175,7 @@ async def toggle_city_search(update: Update, context: ContextTypes.DEFAULT_TYPE)
     label = "только в твоём городе" if city_only else "по всем городам"
     await query.message.reply_text(
         f"Поиск анкет настроен: {label}.",
-        reply_markup=menu_markup(city_only),
+        reply_markup=menu_markup(city_only, context.user_data.get("age_filter")),
     )
 
 
@@ -137,7 +187,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Создай анкету, а затем смотри анкеты и отмечай симпатию. При взаимном лайке бот сообщит об этом обоим.\n\n"
         "Анкеты видны другим пользователям бота. Telegram username показывается при совпадении только если ты отдельно разрешишь это. Используй /delete, чтобы удалить анкету.\n\n"
         "Продолжая, подтверди, что тебе уже исполнилось 18 лет.",
-        reply_markup=menu_markup(context.user_data.get("city_only", False)),
+        reply_markup=menu_markup(context.user_data.get("city_only", False), context.user_data.get("age_filter")),
     )
 
 
@@ -327,7 +377,7 @@ async def matches_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with Session() as db:
         own = db.get(Profile, user_id)
         if own is None:
-            await update.effective_message.reply_text("Сначала создай анкету: /create", reply_markup=menu_markup(context.user_data.get("city_only", False)))
+            await update.effective_message.reply_text("Сначала создай анкету: /create", reply_markup=menu_markup(context.user_data.get("city_only", False), context.user_data.get("age_filter")))
             return
         liked_by_me = set(db.scalars(
             select(Vote.to_id).where(Vote.from_id == user_id, Vote.action == "like")
@@ -345,9 +395,9 @@ async def matches_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 lines.append(f"• {profile.display_name} — контакт не открыт")
     if not lines:
-        await update.effective_message.reply_text("Пока нет взаимных симпатий. Продолжай смотреть анкеты: /next", reply_markup=menu_markup(context.user_data.get("city_only", False)))
+        await update.effective_message.reply_text("Пока нет взаимных симпатий. Продолжай смотреть анкеты: /next", reply_markup=menu_markup(context.user_data.get("city_only", False), context.user_data.get("age_filter")))
         return
-    await update.effective_message.reply_text("Твои взаимные симпатии:\n\n" + "\n".join(lines), reply_markup=menu_markup(context.user_data.get("city_only", False)))
+    await update.effective_message.reply_text("Твои взаимные симпатии:\n\n" + "\n".join(lines), reply_markup=menu_markup(context.user_data.get("city_only", False), context.user_data.get("age_filter")))
 
 
 async def send_next(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE, reply_to=None):
@@ -372,6 +422,15 @@ async def send_next(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TY
             preference_match,
         )
         city_only = context.user_data.get("city_only", False)
+        age_filter = context.user_data.get("age_filter")
+        age_bounds = {
+            "18-25": (18, 25),
+            "26-35": (26, 35),
+            "36-49": (36, 49),
+            "50plus": (50, 99),
+        }.get(age_filter)
+        if age_bounds:
+            candidate_query = candidate_query.where(Profile.age.between(*age_bounds))
         if city_only:
             candidate_query = candidate_query.where(
                 func.lower(func.trim(Profile.city)) == me.city.strip().lower()
@@ -379,27 +438,39 @@ async def send_next(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TY
         candidate = db.scalar(candidate_query.order_by(Profile.created_at.desc()).limit(1))
         fallback_used = False
         if candidate is None and not city_only:
+            fallback_query = select(Profile).where(
+                Profile.telegram_id != user_id,
+                Profile.telegram_id.not_in(already_seen),
+                Profile.telegram_id.not_in(blocked),
+            )
+            if age_bounds:
+                fallback_query = fallback_query.where(Profile.age.between(*age_bounds))
             candidate = db.scalar(
-                select(Profile)
-                .where(Profile.telegram_id != user_id, Profile.telegram_id.not_in(already_seen), Profile.telegram_id.not_in(blocked))
-                .order_by(Profile.created_at.desc())
-                .limit(1)
+                fallback_query.order_by(Profile.created_at.desc()).limit(1)
             )
             fallback_used = candidate is not None
         if candidate is None:
-            msg = (
-                "В твоём городе новых анкет пока нет. Можно отключить фильтр в главном меню."
-                if city_only else
-                "Пока больше нет новых анкет. Загляни позже."
-            )
-            if reply_to:
-                await reply_to.reply_text(msg, reply_markup=menu_markup(context.user_data.get("city_only", False)))
+            if city_only and age_bounds:
+                msg = "В твоём городе и выбранном возрасте новых анкет пока нет. Измени фильтры в главном меню."
+            elif city_only:
+                msg = "В твоём городе новых анкет пока нет. Можно отключить фильтр в главном меню."
+            elif age_bounds:
+                msg = "Новых анкет в выбранном возрасте пока нет. Измени фильтр в главном меню."
             else:
-                await context.bot.send_message(chat_id=chat_id, text=msg, reply_markup=menu_markup(context.user_data.get("city_only", False)))
+                msg = "Пока больше нет новых анкет. Загляни позже."
+            if reply_to:
+                await reply_to.reply_text(msg, reply_markup=menu_markup(context.user_data.get("city_only", False), context.user_data.get("age_filter")))
+            else:
+                await context.bot.send_message(chat_id=chat_id, text=msg, reply_markup=menu_markup(context.user_data.get("city_only", False), context.user_data.get("age_filter")))
             return
         text = card_text(candidate)
         if fallback_used:
-            text = "Подходящих по выбранным настройкам пока нет — показываю другие анкеты." + chr(10) + chr(10) + text
+            fallback_note = (
+                "Подходящих по полу и другим настройкам нет — показываю анкеты выбранного возраста."
+                if age_bounds else
+                "Подходящих по выбранным настройкам пока нет — показываю другие анкеты."
+            )
+            text = fallback_note + chr(10) + chr(10) + text
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("❤️ Нравится", callback_data=f"like:{candidate.telegram_id}"),
             InlineKeyboardButton("👎 Пропустить", callback_data=f"pass:{candidate.telegram_id}"),
@@ -453,7 +524,7 @@ async def previous_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if candidate is None:
         await query.message.reply_text(
             "Пока нет пропущенных анкет, к которым можно вернуться.",
-            reply_markup=menu_markup(context.user_data.get("city_only", False)),
+            reply_markup=menu_markup(context.user_data.get("city_only", False), context.user_data.get("age_filter")),
         )
         return
 
@@ -492,7 +563,7 @@ async def send_next_incoming(chat_id: int, user_id: int, context: ContextTypes.D
             await context.bot.send_message(
                 chat_id=chat_id,
                 text="Сначала создай анкету, чтобы смотреть входящие симпатии: /create",
-                reply_markup=menu_markup(context.user_data.get("city_only", False)),
+                reply_markup=menu_markup(context.user_data.get("city_only", False), context.user_data.get("age_filter")),
             )
             return
         already_voted = select(Vote.to_id).where(Vote.from_id == user_id)
@@ -520,7 +591,7 @@ async def send_next_incoming(chat_id: int, user_id: int, context: ContextTypes.D
         await context.bot.send_message(
             chat_id=chat_id,
             text="Новых лайков пока нет. Когда кто-то отметит тебя, анкета появится здесь.",
-            reply_markup=menu_markup(context.user_data.get("city_only", False)),
+            reply_markup=menu_markup(context.user_data.get("city_only", False), context.user_data.get("age_filter")),
         )
         return
 
@@ -727,7 +798,7 @@ async def delete_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not exists:
         await update.effective_message.reply_text(
             "У тебя пока нет анкеты.",
-            reply_markup=menu_markup(context.user_data.get("city_only", False)),
+            reply_markup=menu_markup(context.user_data.get("city_only", False), context.user_data.get("age_filter")),
         )
         return
     keyboard = InlineKeyboardMarkup([
@@ -752,7 +823,7 @@ async def delete_profile_confirm(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data.pop("likes_inbox", None)
     await query.message.reply_text(
         "Анкета и связанные с ней лайки удалены.",
-        reply_markup=menu_markup(context.user_data.get("city_only", False)),
+        reply_markup=menu_markup(context.user_data.get("city_only", False), context.user_data.get("age_filter")),
     )
 
 
@@ -761,7 +832,7 @@ async def delete_profile_cancel(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer()
     await query.message.reply_text(
         "Анкета сохранена.",
-        reply_markup=menu_markup(context.user_data.get("city_only", False)),
+        reply_markup=menu_markup(context.user_data.get("city_only", False), context.user_data.get("age_filter")),
     )
 
 
@@ -843,6 +914,8 @@ def main():
     app.add_handler(CallbackQueryHandler(delete_profile_confirm, pattern="^delete:confirm$"))
     app.add_handler(CallbackQueryHandler(delete_profile_cancel, pattern="^delete:cancel$"))
     app.add_handler(CallbackQueryHandler(toggle_city_search, pattern="^menu:city$"))
+    app.add_handler(CallbackQueryHandler(age_filter_menu, pattern="^menu:age$"))
+    app.add_handler(CallbackQueryHandler(set_age_filter, pattern="^age:set:(18-25|26-35|36-49|50plus|any)$"))
     app.add_handler(CallbackQueryHandler(previous_profile, pattern="^card:back$"))
     app.add_handler(CallbackQueryHandler(card_action, pattern="^(like|pass|report|block):\\d+$"))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
