@@ -98,6 +98,12 @@ def menu_markup():
     ])
 
 
+async def home_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text("Главное меню — выбери действие:", reply_markup=menu_markup())
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     await message.reply_text(
@@ -229,10 +235,12 @@ async def share_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def card_text(profile: Profile):
     gender_text = {"man": "мужчина", "woman": "женщина", "other": ""}.get(profile.gender, "")
-    details = f"{profile.display_name}, {profile.age}"
+    details = [f"💫 {profile.display_name}, {profile.age}"]
     if gender_text:
-        details += f" · {gender_text}"
-    return f"{details} · {profile.city}\n\n{profile.bio}"
+        details.append(f"👤 {gender_text}")
+    details.append(f"📍 {profile.city}")
+    details.extend(["", f"💬 {profile.bio}"])
+    return "\n".join(details)
 
 
 async def my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -250,6 +258,7 @@ async def my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📝 Изменить анкету", callback_data="menu:create")],
         [InlineKeyboardButton("🔎 Смотреть анкеты", callback_data="menu:next")],
         [InlineKeyboardButton("💞 Взаимные симпатии", callback_data="menu:matches")],
+        [InlineKeyboardButton("🏠 Главное меню", callback_data="menu:home")],
     ])
     if photo_id:
         await update.effective_message.reply_photo(photo=photo_id, caption=text, reply_markup=keyboard)
@@ -264,7 +273,7 @@ async def matches_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with Session() as db:
         own = db.get(Profile, user_id)
         if own is None:
-            await update.effective_message.reply_text("Сначала создай анкету: /create")
+            await update.effective_message.reply_text("Сначала создай анкету: /create", reply_markup=menu_markup())
             return
         liked_by_me = set(db.scalars(
             select(Vote.to_id).where(Vote.from_id == user_id, Vote.action == "like")
@@ -282,9 +291,9 @@ async def matches_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 lines.append(f"• {profile.display_name} — контакт не открыт")
     if not lines:
-        await update.effective_message.reply_text("Пока нет взаимных симпатий. Продолжай смотреть анкеты: /next")
+        await update.effective_message.reply_text("Пока нет взаимных симпатий. Продолжай смотреть анкеты: /next", reply_markup=menu_markup())
         return
-    await update.effective_message.reply_text("Твои взаимные симпатии:\n\n" + "\n".join(lines))
+    await update.effective_message.reply_text("Твои взаимные симпатии:\n\n" + "\n".join(lines), reply_markup=menu_markup())
 
 
 async def send_next(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE, reply_to=None):
@@ -319,9 +328,9 @@ async def send_next(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TY
         if candidate is None:
             msg = "Пока больше нет новых анкет. Загляни позже."
             if reply_to:
-                await reply_to.reply_text(msg)
+                await reply_to.reply_text(msg, reply_markup=menu_markup())
             else:
-                await context.bot.send_message(chat_id=chat_id, text=msg)
+                await context.bot.send_message(chat_id=chat_id, text=msg, reply_markup=menu_markup())
             return
         text = card_text(candidate)
         if fallback_used:
@@ -332,6 +341,8 @@ async def send_next(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TY
         ], [
             InlineKeyboardButton("🚩 Жалоба", callback_data=f"report:{candidate.telegram_id}"),
             InlineKeyboardButton("⛔ Блокировать", callback_data=f"block:{candidate.telegram_id}"),
+        ], [
+            InlineKeyboardButton("🏠 Главное меню", callback_data="menu:home"),
         ]])
         photo_id = candidate.photo_file_id
     if photo_id:
@@ -572,6 +583,7 @@ def main():
     app.add_handler(CallbackQueryHandler(next_command, pattern="^menu:next$"))
     app.add_handler(CallbackQueryHandler(my_profile, pattern="^menu:profile$"))
     app.add_handler(CallbackQueryHandler(matches_command, pattern="^menu:matches$"))
+    app.add_handler(CallbackQueryHandler(home_menu, pattern="^menu:home$"))
     app.add_handler(CallbackQueryHandler(card_action, pattern="^(like|pass|report|block):\\d+$"))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
