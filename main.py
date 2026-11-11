@@ -330,7 +330,7 @@ async def share_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for key, value in values.items():
                 setattr(profile, key, value)
         profile.share_username = allow
-        profile.telegram_username = user.username
+        profile.telegram_username = user.username if allow else None
         db.execute(delete(Vote).where(or_(Vote.from_id == user.id, Vote.to_id == user.id)))
     await query.edit_message_text("Анкета сохранена! Её увидят другие пользователи бота. Используй /next, чтобы начать просмотр.\n\nДля удаления анкеты — /delete.")
     return ConversationHandler.END
@@ -346,6 +346,50 @@ def card_text(profile: Profile):
     return "\n".join(details)
 
 
+def profile_keyboard(username_shared):
+    username_label = (
+        "🔓 Скрыть username при совпадении"
+        if username_shared else
+        "🔒 Разрешить username при совпадении"
+    )
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📝 Изменить анкету", callback_data="menu:create")],
+        [InlineKeyboardButton(username_label, callback_data="menu:username")],
+        [InlineKeyboardButton("🔎 Смотреть анкеты", callback_data="menu:next")],
+        [InlineKeyboardButton("💞 Взаимные симпатии", callback_data="menu:matches")],
+        [InlineKeyboardButton("🗑 Удалить анкету", callback_data="menu:delete")],
+        [InlineKeyboardButton("🏠 Главное меню", callback_data="menu:home")],
+    ])
+
+
+async def toggle_username_visibility(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = update.effective_user
+    with Session.begin() as db:
+        profile = db.get(Profile, user.id)
+        if profile is None:
+            shared = None
+        elif not profile.share_username and not user.username:
+            shared = "missing_username"
+        else:
+            profile.share_username = not profile.share_username
+            profile.telegram_username = user.username if profile.share_username else None
+            shared = profile.share_username
+    if shared is None:
+        await query.answer("Сначала создай анкету.", show_alert=True)
+        return
+    if shared == "missing_username":
+        await query.answer("Сначала добавь username в настройках Telegram.", show_alert=True)
+        return
+    label = (
+        "Username будет виден только после взаимного лайка."
+        if shared else
+        "Username скрыт и удалён из анкеты."
+    )
+    await query.answer(label, show_alert=False)
+    await query.message.edit_reply_markup(reply_markup=profile_keyboard(shared))
+
+
 async def my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         await update.callback_query.answer()
@@ -357,13 +401,8 @@ async def my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         text = "Твоя анкета:\n\n" + card_text(profile)
         photo_id = profile.photo_file_id
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📝 Изменить анкету", callback_data="menu:create")],
-        [InlineKeyboardButton("🔎 Смотреть анкеты", callback_data="menu:next")],
-        [InlineKeyboardButton("💞 Взаимные симпатии", callback_data="menu:matches")],
-        [InlineKeyboardButton("🗑 Удалить анкету", callback_data="menu:delete")],
-        [InlineKeyboardButton("🏠 Главное меню", callback_data="menu:home")],
-    ])
+        username_shared = profile.share_username
+    keyboard = profile_keyboard(username_shared)
     if photo_id:
         await update.effective_message.reply_photo(photo=photo_id, caption=text, reply_markup=keyboard)
     else:
@@ -907,6 +946,7 @@ def main():
     app.add_handler(CallbackQueryHandler(moderation_action, pattern="^mod:(ask_remove|confirm_remove|cancel):\\d+$"))
     app.add_handler(CallbackQueryHandler(next_command, pattern="^menu:next$"))
     app.add_handler(CallbackQueryHandler(my_profile, pattern="^menu:profile$"))
+    app.add_handler(CallbackQueryHandler(toggle_username_visibility, pattern="^menu:username$"))
     app.add_handler(CallbackQueryHandler(matches_command, pattern="^menu:matches$"))
     app.add_handler(CallbackQueryHandler(incoming_likes, pattern="^menu:likes$"))
     app.add_handler(CallbackQueryHandler(home_menu, pattern="^menu:home$"))
