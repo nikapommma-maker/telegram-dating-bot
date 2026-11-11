@@ -1,6 +1,7 @@
 import logging
 import os
 from datetime import datetime, timezone
+from collections import Counter
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, delete, or_, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
@@ -20,6 +21,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger("gift_market_dating")
 
 AGE, NAME, CITY, GENDER, LOOKING_FOR, BIO, PHOTO, SHARE_USERNAME = range(8)
+ADMIN_IDS = {int(value.strip()) for value in os.getenv("ADMIN_IDS", "").split(",") if value.strip().isdigit()}
 
 
 class Base(DeclarativeBase):
@@ -338,6 +340,86 @@ async def card_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_next(query.message.chat_id, user_id, context)
 
 
+async def my_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text(f"Твой Telegram ID: {update.effective_user.id}")
+
+
+async def reports_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    if update.effective_chat.type != "private":
+        await message.reply_text("Открой личный чат с ботом, чтобы просмотреть жалобы.")
+        return
+    user = update.effective_user
+    if not ADMIN_IDS:
+        await message.reply_text("Модерация ещё не настроена. Добавь свой ID в переменную ADMIN_IDS на сервере.")
+        return
+    if user is None or user.id not in ADMIN_IDS:
+        await message.reply_text("Эта команда доступна только модераторам.")
+        return
+    with Session() as db:
+        reported_ids = db.scalars(select(Report.to_id).order_by(Report.created_at.desc()).limit(200)).all()
+        counts = Counter(reported_ids)
+        rows = []
+        for target_id, count in counts.most_common(10):
+            profile = db.get(Profile, target_id)
+            if profile is not None:
+                rows.append(f"• ID {target_id}: {profile.display_name}, {profile.age}, {profile.city} — жалоб: {count}")
+    if not rows:
+        await message.reply_text("Новых жалоб нет.")
+        return
+    await message.reply_text("Жалобы на анкеты (до 10, по числу обращений):" + chr(10) + chr(10) + chr(10).join(rows))
+
+
+async def remove_profile_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    user = update.effective_user
+    if update.effective_chat.type != "private" or user is None or user.id not in ADMIN_IDS:
+        await message.reply_text("Команда доступна только модераторам в личном чате с ботом.")
+        return
+    if len(context.args) != 1 or not context.args[0].isdigit():
+        await message.reply_text("Формат команды: /removeprofile ID")
+        return
+    target_id = int(context.args[0])
+    with Session() as db:
+        profile = db.get(Profile, target_id)
+        display_name = profile.display_name if profile is not None else None
+    if display_name is None:
+        await message.reply_text("Анкета не найдена.")
+        return
+    context.user_data["pending_admin_remove"] = target_id
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Подтвердить удаление", callback_data=f"mod:confirm_remove:{target_id}"),
+        InlineKeyboardButton("Отмена", callback_data=f"mod:cancel:{target_id}"),
+    ]])
+    await message.reply_text(f"Удалить анкету «{display_name}» (ID {target_id}) и связанные отметки?", reply_markup=keyboard)
+
+
+async def moderation_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = update.effective_user
+    if update.effective_chat.type != "private" or user is None or user.id not in ADMIN_IDS:
+        await query.answer("Нет доступа.", show_alert=True)
+        return
+    await query.answer()
+    _, action, target_raw = query.data.split(":", 2)
+    target_id = int(target_raw)
+    if action == "cancel":
+        if context.user_data.get("pending_admin_remove") == target_id:
+            context.user_data.pop("pending_admin_remove", None)
+        await query.edit_message_text("Удаление отменено.")
+        return
+    if context.user_data.get("pending_admin_remove") != target_id:
+        await query.edit_message_text("Подтверждение устарело. Начни снова через /removeprofile ID.")
+        return
+    with Session.begin() as db:
+        db.execute(delete(Vote).where(or_(Vote.from_id == target_id, Vote.to_id == target_id)))
+        db.execute(delete(Block).where(or_(Block.from_id == target_id, Block.to_id == target_id)))
+        db.execute(delete(Report).where(or_(Report.from_id == target_id, Report.to_id == target_id)))
+        db.execute(delete(Profile).where(Profile.telegram_id == target_id))
+    context.user_data.pop("pending_admin_remove", None)
+    await query.edit_message_text("Анкета и связанные отметки удалены.")
+
+
 async def delete_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     with Session.begin() as db:
@@ -361,6 +443,7 @@ async def post_init(application: Application):
         ("next", "Смотреть анкеты"),
         ("delete", "Удалить свою анкету"),
         ("cancel", "Отменить создание анкеты"),
+        ("myid", "Показать свой Telegram ID"),
     ])
 
 
@@ -388,6 +471,10 @@ def main():
     app.add_handler(profile_flow)
     app.add_handler(CommandHandler("next", next_command))
     app.add_handler(CommandHandler("delete", delete_profile))
+    app.add_handler(CommandHandler("myid", my_id))
+    app.add_handler(CommandHandler("reports", reports_command))
+    app.add_handler(CommandHandler("removeprofile", remove_profile_admin))
+    app.add_handler(CallbackQueryHandler(moderation_action, pattern="^mod:(confirm_remove|cancel):\\d+$"))
     app.add_handler(CallbackQueryHandler(next_command, pattern="^menu:next$"))
     app.add_handler(CallbackQueryHandler(card_action, pattern="^(like|pass|report|block):\\d+$"))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
