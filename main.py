@@ -96,6 +96,7 @@ def menu_markup(city_only=False):
         [InlineKeyboardButton("👤 Моя анкета", callback_data="menu:profile"),
          InlineKeyboardButton("💞 Взаимные симпатии", callback_data="menu:matches")],
         [InlineKeyboardButton(city_label, callback_data="menu:city")],
+        [InlineKeyboardButton("❤️ Кто лайкнул меня", callback_data="menu:likes")],
         [InlineKeyboardButton("📝 Создать / обновить анкету", callback_data="menu:create")],
     ])
 
@@ -103,6 +104,7 @@ def menu_markup(city_only=False):
 async def home_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    context.user_data.pop("likes_inbox", None)
     await query.message.reply_text(
         "Главное меню — выбери действие:",
         reply_markup=menu_markup(context.user_data.get("city_only", False)),
@@ -122,6 +124,7 @@ async def toggle_city_search(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("likes_inbox", None)
     message = update.effective_message
     await message.reply_text(
         "Привет! Это новый бот знакомств — тестовая версия для совершеннолетних.\n\n"
@@ -379,7 +382,72 @@ async def send_next(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TY
         await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
 
 async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("likes_inbox", None)
     await send_next(update.effective_chat.id, update.effective_user.id, context, update.effective_message)
+
+
+async def send_next_incoming(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["likes_inbox"] = True
+    with Session() as db:
+        me = db.get(Profile, user_id)
+        if me is None:
+            context.user_data.pop("likes_inbox", None)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="Сначала создай анкету, чтобы смотреть входящие симпатии: /create",
+                reply_markup=menu_markup(context.user_data.get("city_only", False)),
+            )
+            return
+        already_voted = select(Vote.to_id).where(Vote.from_id == user_id)
+        blocked = select(Block.to_id).where(Block.from_id == user_id).union(
+            select(Block.from_id).where(Block.to_id == user_id)
+        )
+        liked_me = select(Vote.from_id).where(Vote.to_id == user_id, Vote.action == "like")
+        candidate = db.scalar(
+            select(Profile)
+            .where(
+                Profile.telegram_id != user_id,
+                Profile.telegram_id.in_(liked_me),
+                Profile.telegram_id.not_in(already_voted),
+                Profile.telegram_id.not_in(blocked),
+            )
+            .order_by(Profile.created_at.desc())
+            .limit(1)
+        )
+        photo_id = candidate.photo_file_id if candidate else None
+        text = card_text(candidate) if candidate else None
+        target_id = candidate.telegram_id if candidate else None
+
+    if candidate is None:
+        context.user_data.pop("likes_inbox", None)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="Новых лайков пока нет. Когда кто-то отметит тебя, анкета появится здесь.",
+            reply_markup=menu_markup(context.user_data.get("city_only", False)),
+        )
+        return
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("❤️ Ответить", callback_data=f"like:{target_id}"),
+            InlineKeyboardButton("👎 Пропустить", callback_data=f"pass:{target_id}"),
+        ],
+        [
+            InlineKeyboardButton("🚩 Жалоба", callback_data=f"report:{target_id}"),
+            InlineKeyboardButton("⛔ Блокировать", callback_data=f"block:{target_id}"),
+        ],
+        [InlineKeyboardButton("🏠 Главное меню", callback_data="menu:home")],
+    ])
+    if photo_id:
+        await context.bot.send_photo(chat_id=chat_id, photo=photo_id, caption=text, reply_markup=keyboard)
+    else:
+        await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+
+
+async def incoming_likes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await send_next_incoming(query.message.chat_id, update.effective_user.id, context)
 
 
 async def card_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -440,7 +508,10 @@ async def card_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.delete()
     except Exception:
         pass
-    await send_next(query.message.chat_id, user_id, context)
+    if context.user_data.get("likes_inbox"):
+        await send_next_incoming(query.message.chat_id, user_id, context)
+    else:
+        await send_next(query.message.chat_id, user_id, context)
 
 
 async def my_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -611,6 +682,7 @@ def main():
     app.add_handler(CallbackQueryHandler(next_command, pattern="^menu:next$"))
     app.add_handler(CallbackQueryHandler(my_profile, pattern="^menu:profile$"))
     app.add_handler(CallbackQueryHandler(matches_command, pattern="^menu:matches$"))
+    app.add_handler(CallbackQueryHandler(incoming_likes, pattern="^menu:likes$"))
     app.add_handler(CallbackQueryHandler(home_menu, pattern="^menu:home$"))
     app.add_handler(CallbackQueryHandler(toggle_city_search, pattern="^menu:city$"))
     app.add_handler(CallbackQueryHandler(card_action, pattern="^(like|pass|report|block):\\d+$"))
