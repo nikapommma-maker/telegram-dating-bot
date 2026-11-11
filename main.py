@@ -44,6 +44,14 @@ class Profile(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class SearchPreference(Base):
+    __tablename__ = "search_preferences"
+
+    telegram_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    city_only: Mapped[bool] = mapped_column(Boolean, default=False)
+    age_filter: Mapped[str | None] = mapped_column(String(16), nullable=True)
+
+
 class Vote(Base):
     __tablename__ = "votes"
     __table_args__ = (UniqueConstraint("from_id", "to_id", name="uq_vote_pair"),)
@@ -89,6 +97,27 @@ def make_database():
 Session = make_database()
 
 
+def load_search_preferences(user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    with Session() as db:
+        preferences = db.get(SearchPreference, user_id)
+        if preferences is None:
+            context.user_data.setdefault("city_only", False)
+            context.user_data.setdefault("age_filter", None)
+        else:
+            context.user_data["city_only"] = preferences.city_only
+            context.user_data["age_filter"] = preferences.age_filter
+
+
+def save_search_preferences(user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    with Session.begin() as db:
+        preferences = db.get(SearchPreference, user_id)
+        if preferences is None:
+            preferences = SearchPreference(telegram_id=user_id)
+            db.add(preferences)
+        preferences.city_only = bool(context.user_data.get("city_only", False))
+        preferences.age_filter = context.user_data.get("age_filter")
+
+
 AGE_FILTER_LABELS = {
     "18-25": "18–25",
     "26-35": "26–35",
@@ -124,6 +153,7 @@ def cancel_markup(button_rows=None):
 async def home_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    load_search_preferences(update.effective_user.id, context)
     context.user_data.pop("likes_inbox", None)
     await query.message.reply_text(
         "Главное меню — выбери действие:",
@@ -134,6 +164,7 @@ async def home_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def age_filter_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    load_search_preferences(update.effective_user.id, context)
     keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("18–25", callback_data="age:set:18-25"),
@@ -155,8 +186,10 @@ async def age_filter_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def set_age_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    load_search_preferences(update.effective_user.id, context)
     selected = query.data.split(":", 2)[2]
     context.user_data["age_filter"] = None if selected == "any" else selected
+    save_search_preferences(update.effective_user.id, context)
     label = age_filter_label(context.user_data.get("age_filter"))
     await query.message.reply_text(
         f"Возрастной фильтр: {label}.",
@@ -170,8 +203,10 @@ async def set_age_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def toggle_city_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    load_search_preferences(update.effective_user.id, context)
     city_only = not context.user_data.get("city_only", False)
     context.user_data["city_only"] = city_only
+    save_search_preferences(update.effective_user.id, context)
     label = "только в твоём городе" if city_only else "по всем городам"
     await query.message.reply_text(
         f"Поиск анкет настроен: {label}.",
@@ -180,6 +215,7 @@ async def toggle_city_search(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    load_search_preferences(update.effective_user.id, context)
     context.user_data.pop("likes_inbox", None)
     message = update.effective_message
     await message.reply_text(
@@ -410,6 +446,7 @@ async def my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def matches_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    load_search_preferences(update.effective_user.id, context)
     if update.callback_query:
         await update.callback_query.answer()
     user_id = update.effective_user.id
@@ -440,6 +477,7 @@ async def matches_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def send_next(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE, reply_to=None):
+    load_search_preferences(user_id, context)
     with Session() as db:
         me = db.get(Profile, user_id)
         if me is None:
@@ -530,6 +568,7 @@ async def send_next(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TY
 async def previous_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    load_search_preferences(update.effective_user.id, context)
     context.user_data.pop("likes_inbox", None)
     user_id = update.effective_user.id
     with Session() as db:
@@ -594,6 +633,7 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def send_next_incoming(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    load_search_preferences(user_id, context)
     context.user_data["likes_inbox"] = True
     with Session() as db:
         me = db.get(Profile, user_id)
@@ -829,6 +869,7 @@ async def moderation_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def delete_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    load_search_preferences(update.effective_user.id, context)
     if update.callback_query:
         await update.callback_query.answer()
     user_id = update.effective_user.id
@@ -853,6 +894,7 @@ async def delete_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def delete_profile_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    load_search_preferences(update.effective_user.id, context)
     user_id = update.effective_user.id
     with Session.begin() as db:
         db.execute(delete(Vote).where(or_(Vote.from_id == user_id, Vote.to_id == user_id)))
@@ -869,6 +911,7 @@ async def delete_profile_confirm(update: Update, context: ContextTypes.DEFAULT_T
 async def delete_profile_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    load_search_preferences(update.effective_user.id, context)
     await query.message.reply_text(
         "Анкета сохранена.",
         reply_markup=menu_markup(context.user_data.get("city_only", False), context.user_data.get("age_filter")),
