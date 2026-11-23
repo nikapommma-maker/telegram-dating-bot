@@ -146,6 +146,7 @@ def menu_markup(city_only=False, age_filter=None, is_admin=False):
         [InlineKeyboardButton(city_label, callback_data="menu:city")],
         [InlineKeyboardButton(age_label, callback_data="menu:age")],
         [InlineKeyboardButton("❤️ Кто лайкнул меня", callback_data="menu:likes")],
+        [InlineKeyboardButton("🔄 Посмотреть пропущенные заново", callback_data="skips:ask")],
         [InlineKeyboardButton("📝 Создать / обновить анкету", callback_data="menu:create")],
         *([[InlineKeyboardButton("👥 Пользователи", callback_data="admin:users:0")]] if is_admin else []),
     ])
@@ -632,6 +633,70 @@ async def send_next(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TY
         await context.bot.send_photo(chat_id=chat_id, photo=photo_id, caption=text, reply_markup=keyboard)
     else:
         await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+
+def reset_skipped_votes(user_id: int, cutoff: int):
+    reported = select(Report.to_id).where(Report.from_id == user_id)
+    blocked = select(Block.to_id).where(Block.from_id == user_id).union(
+        select(Block.from_id).where(Block.to_id == user_id)
+    )
+    with Session.begin() as db:
+        result = db.execute(
+            delete(Vote).where(
+                Vote.from_id == user_id,
+                Vote.action == "pass",
+                Vote.id <= cutoff,
+                Vote.to_id.not_in(reported),
+                Vote.to_id.not_in(blocked),
+            )
+        )
+        return result.rowcount
+
+
+async def reset_skips(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = update.effective_user.id
+    if query.data == "skips:ask":
+        with Session() as db:
+            if db.get(Profile, user_id) is None:
+                await query.answer("Сначала создай анкету.", show_alert=True)
+                return
+            cutoff = db.scalar(
+                select(func.max(Vote.id)).where(Vote.from_id == user_id, Vote.action == "pass")
+            )
+        if cutoff is None:
+            await query.answer("У тебя пока нет пропущенных анкет.", show_alert=True)
+            return
+        context.user_data["reset_skips_cutoff"] = cutoff
+        await query.answer()
+        await replace_callback_text(
+            query,
+            "Вернуть пропущенные анкеты в поиск?\n\nЛайки сохранятся. Анкеты с жалобами и блокировками останутся исключены.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Вернуть в поиск", callback_data="skips:confirm")],
+                [InlineKeyboardButton("Отмена", callback_data="skips:cancel")],
+            ]),
+        )
+        return
+    if query.data == "skips:cancel":
+        context.user_data.pop("reset_skips_cutoff", None)
+        await home_menu(update, context)
+        return
+    cutoff = context.user_data.get("reset_skips_cutoff")
+    if cutoff is None:
+        await query.answer("Открой сброс заново через главное меню.", show_alert=True)
+        return
+    count = reset_skipped_votes(user_id, cutoff)
+    context.user_data.pop("reset_skips_cutoff", None)
+    await query.answer()
+    await replace_callback_text(
+        query,
+        f"Готово! В поиск возвращено анкет: {count}.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔎 Смотреть анкеты", callback_data="menu:next")],
+            [InlineKeyboardButton("🏠 Главное меню", callback_data="menu:home")],
+        ]),
+    )
+
 
 async def previous_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1196,6 +1261,7 @@ def main():
     app.add_handler(CallbackQueryHandler(toggle_city_search, pattern="^menu:city$"))
     app.add_handler(CallbackQueryHandler(age_filter_menu, pattern="^menu:age$"))
     app.add_handler(CallbackQueryHandler(set_age_filter, pattern="^age:set:(18-25|26-35|36-49|50plus|any)$"))
+    app.add_handler(CallbackQueryHandler(reset_skips, pattern="^skips:(ask|confirm|cancel)$"))
     app.add_handler(CallbackQueryHandler(previous_profile, pattern="^card:back$"))
     app.add_handler(CallbackQueryHandler(card_action, pattern="^(like|pass|report|block):\\d+$"))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
