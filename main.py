@@ -20,7 +20,7 @@ from telegram.ext import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("gift_market_dating")
 
-AGE, NAME, CITY, GENDER, LOOKING_FOR, BIO, PHOTO, SHARE_USERNAME = range(8)
+AGE, NAME, CITY, GENDER, LOOKING_FOR, BIO, PHOTO, SHARE_USERNAME, EDIT_PHOTO = range(9)
 ADMIN_IDS = {int(value.strip()) for value in os.getenv("ADMIN_IDS", "").split(",") if value.strip().isdigit()}
 
 
@@ -432,6 +432,58 @@ def card_text(profile: Profile):
     return "\n".join(details)
 
 
+def edit_photo_markup(has_photo=True):
+    rows = []
+    if has_photo:
+        rows.append([InlineKeyboardButton("🗑 Убрать фото", callback_data="photoedit:remove")])
+    rows.append([InlineKeyboardButton("Отмена", callback_data="photoedit:cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def edit_photo_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    with Session() as db:
+        profile = db.get(Profile, update.effective_user.id)
+        if profile is None:
+            await query.answer("Сначала создай анкету.", show_alert=True)
+            return ConversationHandler.END
+        has_photo = bool(profile.photo_file_id)
+    await query.answer()
+    await replace_callback_text(
+        query, "Отправь новую фотографию для анкеты.",
+        reply_markup=edit_photo_markup(has_photo),
+    )
+    return EDIT_PHOTO
+
+
+async def edit_photo_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await my_profile(update, context)
+    return ConversationHandler.END
+
+
+async def edit_photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    if update.callback_query:
+        photo_id = None
+    elif message.photo:
+        photo_id = message.photo[-1].file_id
+    else:
+        with Session() as db:
+            profile = db.get(Profile, update.effective_user.id)
+            has_photo = bool(profile and profile.photo_file_id)
+        await message.reply_text(
+            "Отправь фотографию как фото в Telegram или нажми «Отмена».",
+            reply_markup=edit_photo_markup(has_photo),
+        )
+        return EDIT_PHOTO
+    with Session.begin() as db:
+        profile = db.get(Profile, update.effective_user.id)
+        if profile is not None:
+            profile.photo_file_id = photo_id
+    await my_profile(update, context)
+    return ConversationHandler.END
+
+
 def profile_keyboard(username_shared, hidden=False):
     username_label = (
         "🔓 Скрыть username при совпадении"
@@ -440,6 +492,7 @@ def profile_keyboard(username_shared, hidden=False):
     )
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📝 Изменить анкету", callback_data="menu:create")],
+        [InlineKeyboardButton("📷 Изменить фото", callback_data="photoedit:start")],
         [InlineKeyboardButton(username_label, callback_data="menu:username")],
         [InlineKeyboardButton("👁 Показать анкету" if hidden else "⏸ Скрыть анкету", callback_data="visibility:show" if hidden else "visibility:hide")],
         [InlineKeyboardButton("🔎 Смотреть анкеты", callback_data="menu:next")],
@@ -1275,8 +1328,18 @@ def main():
         raise RuntimeError("Set TELEGRAM_BOT_TOKEN in the environment before starting the bot.")
     app = Application.builder().token(token).post_init(post_init).build()
     profile_flow = ConversationHandler(
-        entry_points=[CommandHandler("create", create_start), CallbackQueryHandler(create_start, pattern="^menu:create$")],
+        entry_points=[
+            CommandHandler("create", create_start),
+            CallbackQueryHandler(create_start, pattern="^menu:create$"),
+            CallbackQueryHandler(edit_photo_start, pattern="^photoedit:start$"),
+        ],
         states={
+            EDIT_PHOTO: [
+                CommandHandler("cancel", edit_photo_cancel),
+                CallbackQueryHandler(edit_photo_cancel, pattern="^photoedit:cancel$"),
+                CallbackQueryHandler(edit_photo_received, pattern="^photoedit:remove$"),
+                MessageHandler(filters.ALL & ~filters.COMMAND, edit_photo_received),
+            ],
             AGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, age_received)],
             NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, name_received)],
             CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, city_received)],
