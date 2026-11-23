@@ -847,6 +847,7 @@ async def card_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     target_id = int(target_raw)
     matched = False
+    new_like = False
     target_name = ""
     target_username = None
     target_share = False
@@ -876,6 +877,7 @@ async def card_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
             db.add(Vote(from_id=user_id, to_id=target_id, action="pass"))
         else:
             vote = db.scalar(select(Vote).where(Vote.from_id == user_id, Vote.to_id == target_id))
+            new_like = action == "like" and (vote is None or vote.action != "like")
             if vote is None:
                 db.add(Vote(from_id=user_id, to_id=target_id, action="like" if action == "like" else "pass"))
             else:
@@ -883,14 +885,21 @@ async def card_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if action == "like":
                 reverse = db.scalar(select(Vote).where(Vote.from_id == target_id, Vote.to_id == user_id, Vote.action == "like"))
                 matched = reverse is not None
-    if action == "like" and matched:
+    if new_like and matched:
         own = update.effective_user
         own_handle = own.username
         other_contact = f"@{target_username}" if target_share and target_username else "Пользователь не разрешил показывать username или не указал его."
         own_contact = f"@{own_handle}" if own_share and own_handle else "Пользователь не разрешил показывать username или не указал его."
-        await context.bot.send_message(user_id, f"🎉 Взаимная симпатия с {target_name}!\nКонтакт: {other_contact}")
-        await context.bot.send_message(target_id, f"🎉 Взаимная симпатия с {own_name}!\nКонтакт: {own_contact}")
-    elif action == "like":
+        notifications = [
+            (user_id, f"🎉 Взаимная симпатия с {target_name}!\nКонтакт: {other_contact}"),
+            (target_id, f"🎉 Взаимная симпатия с {own_name}!\nКонтакт: {own_contact}"),
+        ]
+        for recipient_id, notification in notifications:
+            try:
+                await context.bot.send_message(recipient_id, notification)
+            except Exception as exc:
+                logger.info("Could not notify user %s about a match: %s", recipient_id, exc)
+    elif new_like:
         try:
             await context.bot.send_message(
                 chat_id=target_id,
