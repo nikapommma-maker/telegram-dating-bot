@@ -20,7 +20,7 @@ from telegram.ext import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("gift_market_dating")
 
-AGE, NAME, CITY, GENDER, LOOKING_FOR, BIO, PHOTO, SHARE_USERNAME, EDIT_PHOTO, EDIT_BIO, EDIT_CITY = range(11)
+AGE, NAME, CITY, GENDER, LOOKING_FOR, BIO, PHOTO, SHARE_USERNAME, EDIT_PHOTO, EDIT_BIO, EDIT_CITY, EDIT_NAME = range(12)
 ADMIN_IDS = {int(value.strip()) for value in os.getenv("ADMIN_IDS", "").split(",") if value.strip().isdigit()}
 
 
@@ -504,6 +504,42 @@ async def edit_city_received(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return ConversationHandler.END
 
 
+def edit_name_markup():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Отмена", callback_data="nameedit:cancel")],
+    ])
+
+
+async def edit_name_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    with Session() as db:
+        if db.get(Profile, update.effective_user.id) is None:
+            await query.answer("Сначала создай анкету.", show_alert=True)
+            return ConversationHandler.END
+    await query.answer()
+    await replace_callback_text(
+        query, "Напиши новое имя или псевдоним — от 2 до 40 символов.",
+        reply_markup=edit_name_markup(),
+    )
+    return EDIT_NAME
+
+
+async def edit_name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    name = (update.effective_message.text or "").strip()
+    if not 2 <= len(name) <= 40:
+        await update.effective_message.reply_text(
+            "Имя должно быть текстом от 2 до 40 символов. Попробуй ещё раз.",
+            reply_markup=edit_name_markup(),
+        )
+        return EDIT_NAME
+    with Session.begin() as db:
+        profile = db.get(Profile, update.effective_user.id)
+        if profile is not None:
+            profile.display_name = name
+    await my_profile(update, context)
+    return ConversationHandler.END
+
+
 def edit_photo_markup(has_photo=True):
     rows = []
     if has_photo:
@@ -567,6 +603,7 @@ def profile_keyboard(username_shared, hidden=False):
         [InlineKeyboardButton("📷 Изменить фото", callback_data="photoedit:start")],
         [InlineKeyboardButton("💬 Изменить описание", callback_data="bioedit:start")],
         [InlineKeyboardButton("📍 Изменить город", callback_data="cityedit:start")],
+        [InlineKeyboardButton("👤 Изменить имя", callback_data="nameedit:start")],
         [InlineKeyboardButton(username_label, callback_data="menu:username")],
         [InlineKeyboardButton("👁 Показать анкету" if hidden else "⏸ Скрыть анкету", callback_data="visibility:show" if hidden else "visibility:hide")],
         [InlineKeyboardButton("🔎 Смотреть анкеты", callback_data="menu:next")],
@@ -1427,8 +1464,14 @@ def main():
             CallbackQueryHandler(edit_photo_start, pattern="^photoedit:start$"),
             CallbackQueryHandler(edit_bio_start, pattern="^bioedit:start$"),
             CallbackQueryHandler(edit_city_start, pattern="^cityedit:start$"),
+            CallbackQueryHandler(edit_name_start, pattern="^nameedit:start$"),
         ],
         states={
+            EDIT_NAME: [
+                CommandHandler("cancel", edit_profile_cancel),
+                CallbackQueryHandler(edit_profile_cancel, pattern="^nameedit:cancel$"),
+                MessageHandler(filters.ALL & ~filters.COMMAND, edit_name_received),
+            ],
             EDIT_CITY: [
                 CommandHandler("cancel", edit_profile_cancel),
                 CallbackQueryHandler(edit_profile_cancel, pattern="^cityedit:cancel$"),
