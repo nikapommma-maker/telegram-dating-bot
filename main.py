@@ -44,6 +44,12 @@ class Profile(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class HiddenProfile(Base):
+    __tablename__ = "hidden_profiles"
+
+    telegram_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+
 class SearchPreference(Base):
     __tablename__ = "search_preferences"
 
@@ -422,7 +428,7 @@ def card_text(profile: Profile):
     return "\n".join(details)
 
 
-def profile_keyboard(username_shared):
+def profile_keyboard(username_shared, hidden=False):
     username_label = (
         "🔓 Скрыть username при совпадении"
         if username_shared else
@@ -431,6 +437,7 @@ def profile_keyboard(username_shared):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📝 Изменить анкету", callback_data="menu:create")],
         [InlineKeyboardButton(username_label, callback_data="menu:username")],
+        [InlineKeyboardButton("👁 Показать анкету" if hidden else "⏸ Скрыть анкету", callback_data="visibility:show" if hidden else "visibility:hide")],
         [InlineKeyboardButton("🔎 Смотреть анкеты", callback_data="menu:next")],
         [InlineKeyboardButton("💞 Взаимные симпатии", callback_data="menu:matches")],
         [InlineKeyboardButton("🗑 Удалить анкету", callback_data="menu:delete")],
@@ -451,6 +458,7 @@ async def toggle_username_visibility(update: Update, context: ContextTypes.DEFAU
             profile.share_username = not profile.share_username
             profile.telegram_username = user.username if profile.share_username else None
             shared = profile.share_username
+        hidden = db.get(HiddenProfile, user.id) is not None
     if shared is None:
         await query.answer("Сначала создай анкету.", show_alert=True)
         return
@@ -463,7 +471,23 @@ async def toggle_username_visibility(update: Update, context: ContextTypes.DEFAU
         "Username скрыт и удалён из анкеты."
     )
     await query.answer(label, show_alert=False)
-    await query.message.edit_reply_markup(reply_markup=profile_keyboard(shared))
+    await query.message.edit_reply_markup(reply_markup=profile_keyboard(shared, hidden))
+
+
+async def set_profile_visibility(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = update.effective_user.id
+    hidden = query.data == "visibility:hide"
+    with Session.begin() as db:
+        if db.get(Profile, user_id) is None:
+            await query.answer("Сначала создай анкету.", show_alert=True)
+            return
+        entry = db.get(HiddenProfile, user_id)
+        if hidden and entry is None:
+            db.add(HiddenProfile(telegram_id=user_id))
+        elif not hidden and entry is not None:
+            db.delete(entry)
+    await my_profile(update, context)
 
 
 async def my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -475,10 +499,12 @@ async def my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if profile is None:
             await replace_callback_text(update.callback_query, "Анкеты пока нет. Создай её: /create", fallback_message=update.effective_message)
             return
-        text = "Твоя анкета:\n\n" + card_text(profile)
+        hidden = db.get(HiddenProfile, user_id) is not None
+        status = "⏸ Анкета скрыта из поиска." if hidden else "👁 Анкета видна в поиске."
+        text = "Твоя анкета:\n\n" + status + "\n\n" + card_text(profile)
         photo_id = profile.photo_file_id
         username_shared = profile.share_username
-    keyboard = profile_keyboard(username_shared)
+    keyboard = profile_keyboard(username_shared, hidden)
     if photo_id:
         await replace_callback_photo(update.callback_query, context, photo_id, text, reply_markup=keyboard, fallback_message=update.effective_message)
     else:
@@ -535,6 +561,7 @@ async def send_next(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TY
             Profile.telegram_id != user_id,
             Profile.telegram_id.not_in(already_seen),
             Profile.telegram_id.not_in(blocked),
+                Profile.telegram_id.not_in(select(HiddenProfile.telegram_id)),
             gender_match,
             preference_match,
         )
@@ -765,8 +792,8 @@ async def card_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         own_name = own_profile.display_name
         own_share = own_profile.share_username
         target = db.get(Profile, target_id)
-        if target is None:
-            await replace_callback_text(query, "Эта анкета больше недоступна.")
+        if target is None or (action in {"like", "pass"} and db.get(HiddenProfile, target_id) is not None):
+            await replace_callback_text(query, "Эта анкета больше недоступна.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔎 Следующая анкета", callback_data="menu:next")]]))
             return
         target_name = target.display_name
         target_username = target.telegram_username
@@ -907,6 +934,7 @@ async def moderation_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.execute(delete(Vote).where(or_(Vote.from_id == target_id, Vote.to_id == target_id)))
         db.execute(delete(Block).where(or_(Block.from_id == target_id, Block.to_id == target_id)))
         db.execute(delete(Report).where(or_(Report.from_id == target_id, Report.to_id == target_id)))
+        db.execute(delete(HiddenProfile).where(HiddenProfile.telegram_id == target_id))
         db.execute(delete(Profile).where(Profile.telegram_id == target_id))
     context.user_data.pop("pending_admin_remove", None)
     await query.edit_message_text("Анкета и связанные отметки удалены.")
@@ -1062,6 +1090,7 @@ async def delete_profile_confirm(update: Update, context: ContextTypes.DEFAULT_T
         db.execute(delete(Vote).where(or_(Vote.from_id == user_id, Vote.to_id == user_id)))
         db.execute(delete(Block).where(or_(Block.from_id == user_id, Block.to_id == user_id)))
         db.execute(delete(Report).where(or_(Report.from_id == user_id, Report.to_id == user_id)))
+        db.execute(delete(HiddenProfile).where(HiddenProfile.telegram_id == user_id))
         db.execute(delete(Profile).where(Profile.telegram_id == user_id))
     context.user_data.pop("likes_inbox", None)
     await replace_callback_text(query, 
@@ -1153,6 +1182,7 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_user_detail, pattern="^admin:user:\\d+:\\d+$"))
     app.add_handler(CallbackQueryHandler(next_command, pattern="^menu:next$"))
     app.add_handler(CallbackQueryHandler(my_profile, pattern="^menu:profile$"))
+    app.add_handler(CallbackQueryHandler(set_profile_visibility, pattern="^visibility:(show|hide)$"))
     app.add_handler(CallbackQueryHandler(toggle_username_visibility, pattern="^menu:username$"))
     app.add_handler(CallbackQueryHandler(matches_command, pattern="^menu:matches$"))
     app.add_handler(CallbackQueryHandler(incoming_likes, pattern="^menu:likes$"))
