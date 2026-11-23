@@ -148,7 +148,10 @@ def menu_markup(city_only=False, age_filter=None, is_admin=False):
         [InlineKeyboardButton("❤️ Кто лайкнул меня", callback_data="menu:likes")],
         [InlineKeyboardButton("🔄 Посмотреть пропущенные заново", callback_data="skips:ask")],
         [InlineKeyboardButton("📝 Создать / обновить анкету", callback_data="menu:create")],
-        *([[InlineKeyboardButton("👥 Пользователи", callback_data="admin:users:0")]] if is_admin else []),
+        *([
+            [InlineKeyboardButton("👥 Пользователи", callback_data="admin:users:0")],
+            [InlineKeyboardButton("📊 Статистика", callback_data="admin:stats")],
+        ] if is_admin else []),
     ])
 
 
@@ -1030,6 +1033,53 @@ def admin_only_private(update: Update) -> bool:
     )
 
 
+async def admin_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not admin_only_private(update):
+        await query.answer("Нет доступа.", show_alert=True)
+        return
+    await query.answer()
+    reverse = Vote.__table__.alias("reverse_votes")
+    with Session() as db:
+        total = db.scalar(select(func.count()).select_from(Profile))
+        hidden = db.scalar(
+            select(func.count()).select_from(HiddenProfile)
+            .join(Profile, Profile.telegram_id == HiddenProfile.telegram_id)
+        )
+        likes = db.scalar(
+            select(func.count()).select_from(Vote).where(Vote.action == "like")
+        )
+        mutual = db.scalar(
+            select(func.count()).select_from(Vote).where(
+                Vote.action == "like",
+                Vote.from_id < Vote.to_id,
+                select(reverse.c.id).where(
+                    reverse.c.from_id == Vote.to_id,
+                    reverse.c.to_id == Vote.from_id,
+                    reverse.c.action == "like",
+                ).exists(),
+            )
+        )
+        reports = db.scalar(select(func.count()).select_from(Report))
+    text = (
+        f"📊 Статистика бота\n\n"
+        f"👥 Всего анкет: {total}\n"
+        f"👁 Видимых в поиске: {total - hidden}\n"
+        f"⏸ Скрытых: {hidden}\n"
+        f"❤️ Лайков: {likes}\n"
+        f"💞 Взаимных пар: {mutual}\n"
+        f"🚩 Жалоб: {reports}"
+    )
+    await replace_callback_text(
+        query, text,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Обновить", callback_data="admin:stats")],
+            [InlineKeyboardButton("👥 Пользователи", callback_data="admin:users:0")],
+            [InlineKeyboardButton("🏠 Главное меню", callback_data="menu:home")],
+        ]),
+    )
+
+
 async def admin_users_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not admin_only_private(update):
@@ -1255,6 +1305,7 @@ def main():
     app.add_handler(CommandHandler("reports", reports_command))
     app.add_handler(CommandHandler("removeprofile", remove_profile_admin))
     app.add_handler(CallbackQueryHandler(moderation_action, pattern="^mod:(ask_remove|confirm_remove|cancel):\\d+$"))
+    app.add_handler(CallbackQueryHandler(admin_statistics, pattern="^admin:stats$"))
     app.add_handler(CallbackQueryHandler(admin_users_page, pattern="^admin:users:\\d+$"))
     app.add_handler(CallbackQueryHandler(admin_user_detail, pattern="^admin:user:\\d+:\\d+$"))
     app.add_handler(CallbackQueryHandler(next_command, pattern="^menu:next$"))
