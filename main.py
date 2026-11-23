@@ -621,8 +621,14 @@ async def matches_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         liked_me = set(db.scalars(
             select(Vote.from_id).where(Vote.to_id == user_id, Vote.action == "like")
         ).all())
+        blocked = select(Block.to_id).where(Block.from_id == user_id).union(
+            select(Block.from_id).where(Block.to_id == user_id)
+        )
         matches = db.scalars(
-            select(Profile).where(Profile.telegram_id.in_(liked_by_me & liked_me)).order_by(Profile.created_at.desc())
+            select(Profile).where(
+                Profile.telegram_id.in_(liked_by_me & liked_me),
+                Profile.telegram_id.not_in(blocked),
+            ).order_by(Profile.created_at.desc())
         ).all()
         lines = []
         for profile in matches:
@@ -954,7 +960,16 @@ async def card_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         own_name = own_profile.display_name
         own_share = own_profile.share_username
         target = db.get(Profile, target_id)
-        if target is None or (action in {"like", "pass"} and db.get(HiddenProfile, target_id) is not None):
+        blocked_pair = db.scalar(
+            select(Block.id).where(or_(
+                (Block.from_id == user_id) & (Block.to_id == target_id),
+                (Block.from_id == target_id) & (Block.to_id == user_id),
+            )).limit(1)
+        )
+        if target is None or (
+            action in {"like", "pass"}
+            and (blocked_pair is not None or db.get(HiddenProfile, target_id) is not None)
+        ):
             await replace_callback_text(query, "Эта анкета больше недоступна.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔎 Следующая анкета", callback_data="menu:next")]]))
             return
         target_name = target.display_name
@@ -965,7 +980,11 @@ async def card_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
             db.execute(delete(Vote).where(Vote.from_id == user_id, Vote.to_id == target_id))
             db.add(Vote(from_id=user_id, to_id=target_id, action="pass"))
         elif action == "block":
-            db.add(Block(from_id=user_id, to_id=target_id))
+            own_block = db.scalar(
+                select(Block.id).where(Block.from_id == user_id, Block.to_id == target_id)
+            )
+            if own_block is None:
+                db.add(Block(from_id=user_id, to_id=target_id))
             db.execute(delete(Vote).where(Vote.from_id == user_id, Vote.to_id == target_id))
             db.add(Vote(from_id=user_id, to_id=target_id, action="pass"))
         else:
