@@ -561,7 +561,7 @@ async def send_next(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TY
             Profile.telegram_id != user_id,
             Profile.telegram_id.not_in(already_seen),
             Profile.telegram_id.not_in(blocked),
-                Profile.telegram_id.not_in(select(HiddenProfile.telegram_id)),
+            Profile.telegram_id.not_in(select(HiddenProfile.telegram_id)),
             gender_match,
             preference_match,
         )
@@ -586,6 +586,7 @@ async def send_next(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TY
                 Profile.telegram_id != user_id,
                 Profile.telegram_id.not_in(already_seen),
                 Profile.telegram_id.not_in(blocked),
+                Profile.telegram_id.not_in(select(HiddenProfile.telegram_id)),
             )
             if age_bounds:
                 fallback_query = fallback_query.where(Profile.age.between(*age_bounds))
@@ -654,6 +655,7 @@ async def previous_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 Vote.from_id == user_id,
                 Vote.action == "pass",
                 Profile.telegram_id.not_in(blocked),
+                Profile.telegram_id.not_in(select(HiddenProfile.telegram_id)),
                 Profile.telegram_id.not_in(reported),
             )
         )
@@ -727,6 +729,7 @@ async def send_next_incoming(chat_id: int, user_id: int, context: ContextTypes.D
                 Profile.telegram_id.in_(liked_me),
                 Profile.telegram_id.not_in(already_voted),
                 Profile.telegram_id.not_in(blocked),
+                Profile.telegram_id.not_in(select(HiddenProfile.telegram_id)),
             )
             .order_by(Profile.created_at.desc())
             .limit(1)
