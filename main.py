@@ -20,7 +20,7 @@ from telegram.ext import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("gift_market_dating")
 
-AGE, NAME, CITY, GENDER, LOOKING_FOR, BIO, PHOTO, SHARE_USERNAME, EDIT_PHOTO = range(9)
+AGE, NAME, CITY, GENDER, LOOKING_FOR, BIO, PHOTO, SHARE_USERNAME, EDIT_PHOTO, EDIT_BIO = range(10)
 ADMIN_IDS = {int(value.strip()) for value in os.getenv("ADMIN_IDS", "").split(",") if value.strip().isdigit()}
 
 
@@ -432,6 +432,42 @@ def card_text(profile: Profile):
     return "\n".join(details)
 
 
+def edit_bio_markup():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Отмена", callback_data="bioedit:cancel")],
+    ])
+
+
+async def edit_bio_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    with Session() as db:
+        if db.get(Profile, update.effective_user.id) is None:
+            await query.answer("Сначала создай анкету.", show_alert=True)
+            return ConversationHandler.END
+    await query.answer()
+    await replace_callback_text(
+        query, "Напиши новое описание анкеты — от 2 до 500 символов.",
+        reply_markup=edit_bio_markup(),
+    )
+    return EDIT_BIO
+
+
+async def edit_bio_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    bio = (update.effective_message.text or "").strip()
+    if not 2 <= len(bio) <= 500:
+        await update.effective_message.reply_text(
+            "Описание должно быть текстом от 2 до 500 символов. Попробуй ещё раз.",
+            reply_markup=edit_bio_markup(),
+        )
+        return EDIT_BIO
+    with Session.begin() as db:
+        profile = db.get(Profile, update.effective_user.id)
+        if profile is not None:
+            profile.bio = bio
+    await my_profile(update, context)
+    return ConversationHandler.END
+
+
 def edit_photo_markup(has_photo=True):
     rows = []
     if has_photo:
@@ -456,7 +492,7 @@ async def edit_photo_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return EDIT_PHOTO
 
 
-async def edit_photo_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def edit_profile_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await my_profile(update, context)
     return ConversationHandler.END
 
@@ -493,6 +529,7 @@ def profile_keyboard(username_shared, hidden=False):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📝 Изменить анкету", callback_data="menu:create")],
         [InlineKeyboardButton("📷 Изменить фото", callback_data="photoedit:start")],
+        [InlineKeyboardButton("💬 Изменить описание", callback_data="bioedit:start")],
         [InlineKeyboardButton(username_label, callback_data="menu:username")],
         [InlineKeyboardButton("👁 Показать анкету" if hidden else "⏸ Скрыть анкету", callback_data="visibility:show" if hidden else "visibility:hide")],
         [InlineKeyboardButton("🔎 Смотреть анкеты", callback_data="menu:next")],
@@ -1332,11 +1369,17 @@ def main():
             CommandHandler("create", create_start),
             CallbackQueryHandler(create_start, pattern="^menu:create$"),
             CallbackQueryHandler(edit_photo_start, pattern="^photoedit:start$"),
+            CallbackQueryHandler(edit_bio_start, pattern="^bioedit:start$"),
         ],
         states={
+            EDIT_BIO: [
+                CommandHandler("cancel", edit_profile_cancel),
+                CallbackQueryHandler(edit_profile_cancel, pattern="^bioedit:cancel$"),
+                MessageHandler(filters.ALL & ~filters.COMMAND, edit_bio_received),
+            ],
             EDIT_PHOTO: [
-                CommandHandler("cancel", edit_photo_cancel),
-                CallbackQueryHandler(edit_photo_cancel, pattern="^photoedit:cancel$"),
+                CommandHandler("cancel", edit_profile_cancel),
+                CallbackQueryHandler(edit_profile_cancel, pattern="^photoedit:cancel$"),
                 CallbackQueryHandler(edit_photo_received, pattern="^photoedit:remove$"),
                 MessageHandler(filters.ALL & ~filters.COMMAND, edit_photo_received),
             ],
