@@ -641,6 +641,7 @@ def profile_keyboard(username_shared, hidden=False):
         [InlineKeyboardButton("📍 Изменить город", callback_data="cityedit:start")],
         [InlineKeyboardButton("👤 Изменить имя", callback_data="nameedit:start")],
         [InlineKeyboardButton("🎂 Изменить возраст", callback_data="ageedit:start")],
+        [InlineKeyboardButton("🔎 Кого искать", callback_data="lookingedit:menu")],
         [InlineKeyboardButton(username_label, callback_data="menu:username")],
         [InlineKeyboardButton("👁 Показать анкету" if hidden else "⏸ Скрыть анкету", callback_data="visibility:show" if hidden else "visibility:hide")],
         [InlineKeyboardButton("🔎 Смотреть анкеты", callback_data="menu:next")],
@@ -648,6 +649,36 @@ def profile_keyboard(username_shared, hidden=False):
         [InlineKeyboardButton("🗑 Удалить анкету", callback_data="menu:delete")],
         [InlineKeyboardButton("🏠 Главное меню", callback_data="menu:home")],
     ])
+
+
+async def edit_looking_for(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    choice = query.data.split(":", 1)[1]
+    with Session.begin() as db:
+        profile = db.get(Profile, update.effective_user.id)
+        if profile is None:
+            await query.answer("Сначала создай анкету.", show_alert=True)
+            return
+        current = profile.looking_for
+        if choice in {"man", "woman", "any"}:
+            profile.looking_for = choice
+    if choice != "menu":
+        await my_profile(update, context)
+        return
+    await query.answer()
+    labels = {"man": "Мужчин", "woman": "Женщин", "any": "Всех"}
+    rows = [
+        [InlineKeyboardButton(
+            label + (" ✓" if value == current else ""),
+            callback_data=f"lookingedit:{value}",
+        )]
+        for value, label in labels.items()
+    ]
+    rows.append([InlineKeyboardButton("← Моя анкета", callback_data="menu:profile")])
+    await replace_callback_text(
+        query, f"Кого ты хочешь видеть в поиске? Сейчас: {labels.get(current, 'Всех').lower()}.",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
 
 
 async def toggle_username_visibility(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -706,7 +737,8 @@ async def my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         hidden = db.get(HiddenProfile, user_id) is not None
         status = "⏸ Анкета скрыта из поиска." if hidden else "👁 Анкета видна в поиске."
-        text = "Твоя анкета:\n\n" + status + "\n\n" + card_text(profile)
+        preference = {"man": "мужчин", "woman": "женщин", "any": "всех"}.get(profile.looking_for, "всех")
+        text = "Твоя анкета:\n\n" + status + f"\n🔎 Ищу: {preference}" + "\n\n" + card_text(profile)
         photo_id = profile.photo_file_id
         username_shared = profile.share_username
     keyboard = profile_keyboard(username_shared, hidden)
@@ -1565,6 +1597,7 @@ def main():
     app.add_handler(CallbackQueryHandler(next_command, pattern="^menu:next$"))
     app.add_handler(CallbackQueryHandler(my_profile, pattern="^menu:profile$"))
     app.add_handler(CallbackQueryHandler(set_profile_visibility, pattern="^visibility:(show|hide)$"))
+    app.add_handler(CallbackQueryHandler(edit_looking_for, pattern="^lookingedit:(menu|man|woman|any)$"))
     app.add_handler(CallbackQueryHandler(toggle_username_visibility, pattern="^menu:username$"))
     app.add_handler(CallbackQueryHandler(matches_command, pattern="^menu:matches$"))
     app.add_handler(CallbackQueryHandler(incoming_likes, pattern="^menu:likes$"))
